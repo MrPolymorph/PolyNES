@@ -148,7 +148,7 @@ namespace PolyNES.PPU.Registers
             VerticalBlank = false;
         }
     }
-    
+
     public enum PpuStatusRegisterFlags
     {
         /// <summary>

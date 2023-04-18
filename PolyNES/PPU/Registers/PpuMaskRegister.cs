@@ -24,10 +24,12 @@ namespace PolyNES.PPU.Registers
         /// Enable background display (when true)
         /// </summary>
         private bool _backgrounds;
+        
         /// <summary>
         /// Enable sprite display (when true)
         /// </summary>
         private bool _sprites;
+        
         private bool _red;
         private bool _green;
         private bool _blue;

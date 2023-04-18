@@ -11,22 +11,31 @@ using PolyNES.PPU.Registers;
 namespace PolyNES.PPU
 {
     /// <summary>
-    /// PPU Memory Map
-    ///          |______________________________________|
-    /// 0xFFFF - |             Mirrors                  |
-    ///          |         0x0000 -> 0x3FFF             |
-    ///          |______________________________________|
-    /// 0x4000 - |                                      |
-    ///          |              Palettes                |
-    /// 0x3F00 - |______________________________________|
-    ///          |                                      |
-    ///          |             Name Tables              |
-    ///          |               (VRAM)                 |
-    /// 0x2000 - |______________________________________|
-    ///          |                                      |
-    ///          |            Pattern Tables            |
-    ///          |              (CHR ROM)               |
-    ///  0x0000 -|--------------------------------------|
+    /// The PPU contains the following:
+    ///
+    /// Background:
+    ///     VRAM address, temporary VRAM address, fine X scroll, and first/second write toggle -
+    ///     This controls the addresses that the PPU reads during background rendering. See PPU scrolling.
+    ///
+    ///     2 16-bit shift registers - These contain the pattern table data for two tiles. Every 8 cycles,
+    ///     the data for the next tile is loaded into the upper 8 bits of this shift register. Meanwhile, the pixel to
+    ///     render is fetched from one of the lower 8 bits.
+    ///
+    ///     2 8-bit shift registers - These contain the palette attributes for the lower 8 pixels of the 16-bit shift register.
+    ///     These registers are fed by a latch which contains the palette attribute for the next tile. Every 8 cycles,
+    ///     the latch is loaded with the palette attribute for the next tile.
+    ///
+    ///  Sprites:
+    ///     Primary OAM (holds 64 sprites for the frame)
+    ///
+    ///     Secondary OAM (holds 8 sprites for the current scanline)
+    ///
+    ///     8 pairs of 8-bit shift registers - These contain the pattern table data for up to 8 sprites, to be rendered
+    ///     on the current scanline. Unused sprites are loaded with an all-transparent set of values.
+    ///
+    ///     8 latches - These contain the attribute bytes for up to 8 sprites.
+    ///
+    ///     8 counters - These contain the X positions for up to 8 sprites.
     /// </summary>
     public class Poly2C02 : AbstractAddressDataBus
     {
@@ -34,28 +43,20 @@ namespace PolyNES.PPU
         private const int ScanLineVisibleDots = 256;
      
         public readonly Color[] Screen;
+        public bool FrameComplete;
         
         private readonly ICartridge _cartridge;
         private readonly Random _random;
-        /// <summary>
-        /// This Video ram is the external 2KB ram chip
-        /// which contains the 2 nametables.
-        /// </summary>
-        private readonly VideoRam _videoRam;
-        private byte[] _paletteTable;
-        private ushort _nametable0, _nametable1, _nametable2, _nametable3;
-        //scanline can be through of as the current column
-        private int _currentScanline;
-        //cycle can be thought of as the current row
-        private int _currentCycle;
         private RenderState _currentRenderState;
-        public bool FrameComplete;
-        private bool _showBackground;
-        private bool _showSprites;
-        private int _frame;
-        private ushort _temporaryAddressStore;
-        private int _fineX;
-        private bool _hideEdgeBackground;
+        private ushort _nametable0Address, _nametable1Address, _nametable2Address, _nametable3Address;
+        private byte _horizontalLatch, _verticalLatch;
+        private byte[] _paletteTable;
+        private Color[] _nametable0;
+        private Color[] _nametable1;
+        private int _scanline;
+        private int _cycle;
+        private bool _oddFrame;
+        private bool _enableNMI;
         
         #region Registers
         private readonly PpuControlRegister _controlRegister;
@@ -70,18 +71,24 @@ namespace PolyNES.PPU
 
         public Poly2C02(ICartridge cartridge)
         {
+            FrameComplete = false;
             _cartridge = cartridge;
             _cartridge.RegisterCartridgeLoadedCallback(CartridgeLoaded);
             _controlRegister = new PpuControlRegister();
             _maskRegister = new PpuMaskRegister();
             _statusRegister = new PpuStatusRegister();
             _scrollRegister = new PpuScrollRegister();
-            _videoRam = new VideoRam();
-            _currentScanline = 0;
-            _currentCycle = 0;
             _paletteTable = new byte[32];
             Screen = new Color[256 * 240];
             _currentRenderState = RenderState.PreRender;
+            _oddFrame = false;
+            _enableNMI = false;
+            _scanline = 0;
+            _scanline = 0;
+            _horizontalLatch = 0;
+            _verticalLatch = 0;
+            _nametable0 = new Color[256 * 240];
+            _nametable1 = new Color[256 * 240];
         }
 
         public override byte Read(ushort address, bool ronly = false)
@@ -219,65 +226,135 @@ namespace PolyNES.PPU
 
 
         }
-        
 
+        /// <summary>
+        /// Every cycle, a bit is fetched from the 4 background shift registers in order to create a pixel on screen.
+        /// Exactly which bit is fetched depends on the fine X scroll, set by $2005 (this is how fine X scrolling is possible).
+        /// Afterwards, the shift registers are shifted once, to the data for the next pixel.
+        ///
+        /// Every 8 cycles/shifts, new data is loaded into these registers.
+        ///
+        /// Every cycle, the 8 x-position counters for the sprites are decremented by one. For each sprite,
+        /// if the counter is still nonzero, nothing else happens. If the counter is zero, the sprite becomes "active",
+        /// and the respective pair of shift registers for the sprite is shifted once every cycle. This output accompanies
+        /// the data in the sprite's latch, to form a pixel. The current pixel for each "active" sprite is checked
+        /// (from highest to lowest priority), and the first non-transparent pixel moves on to a multiplexer, where it
+        /// joins the BG pixel.
+        ///
+        /// If the sprite has foreground priority or the BG pixel is zero, the sprite pixel is output.
+        ///
+        /// If the sprite has background priority and the BG pixel is nonzero, the BG pixel is output.
+        /// (Note: Even though the sprite is "behind the background", it was still the the highest priority sprite to
+        /// have a non-transparent pixel, and thus the only sprite to be looked at. Therefore, the BG pixel is output
+        /// even if another foreground priority sprite is present at this pixel. This is where the sprite priority quirk
+        /// comes from.)
+        ///
+        /// The PPU renders 262 scanlines per frame. Each scanline lasts for 341 PPU clock cycles
+        /// (113.667 CPU clock cycles; 1 CPU cycle = 3 PPU cycles), with each clock cycle producing one pixel.
+        /// The line numbers given here correspond to how the internal PPU frame counters count lines.
+        ///
+        /// The information in this section is summarized in the diagram in the next section.
+        ///
+        /// The timing below is for NTSC PPUs. PPUs for 50 Hz TV systems differ:
+        /// Dendy PPUs render 51 post-render scanlines instead of 1
+        /// PAL NES PPUs render 70 vblank scanlines instead of 20, and they additionally run 3.2 PPU cycles per CPU cycle,
+        /// or 106.5625 CPU clock cycles per scanline.
+        /// </summary>
         public override void Clock()
         {
-            switch (_currentRenderState)
-            {
-                case (RenderState.PreRender):
-                {
-                    if (_currentCycle == 1)
-                    {
-                        //reset VBlank and 0Hit
-                        _statusRegister.SetFlag(PpuStatusRegisterFlags.V, false);
-                        _statusRegister.SetFlag(PpuStatusRegisterFlags.S, false)
-                    }
-                    else if (_currentCycle == ScanLineVisibleDots + 2 &&
-                             _showBackground &&
-                             _showSprites)
-                    {
-                        AddressBusAddress &= unchecked((ushort)~0x41F);
-                        AddressBusAddress |= _temporaryAddressStore;
-                    }
-                    else if (_currentCycle > 280 && _currentCycle <= 304 && _showBackground && _showSprites)
-                    {
-                        AddressBusAddress &= unchecked((ushort)~0x7BE0);
-                        AddressBusAddress |= (ushort)(_temporaryAddressStore & 0x7BE0);
-                    }
+            /* This is a dummy scanline, whose sole purpose is to fill the shift registers with the data for the first
+               two tiles of the next scanline. Although no pixels are rendered for this scanline, the PPU still makes
+               the same memory accesses it would for a regular scanline.
+               
+               This scanline varies in length, depending on whether an even or an odd frame is being rendered. For odd
+               frames, the cycle at the end of the scanline is skipped (this is done internally by jumping directly
+               from (339,261) to (0,0), replacing the idle tick at the beginning of the first visible scanline with the
+               last tick of the last dummy nametable fetch). For even frames, the last cycle occurs normally. This is
+               done to compensate for some shortcomings with the way the PPU physically outputs its video signal, the
+               end result being a crisper image when the screen isn't scrolling. However, this behavior can be bypassed
+               by keeping rendering disabled until after this scanline has passed, which results in an image that looks
+               more like a traditionally interlaced picture.
+               During pixels 280 through 304 of this scanline, the vertical scroll bits are reloaded if rendering is enabled.
+             */ 
 
-                    
-                    if (_currentCycle >= MaxPPUCycles - (_frame % 2 == 1 && _showBackground && _showSprites).ToInt())
-                    {
-                        _currentRenderState = RenderState.Render;
-                        _currentCycle = 0;
-                        _currentScanline = 0;
-                    }
-                    break;
+            //visible Scanlines
+            if (_scanline >= -1 && _scanline < 240)
+            { 
+                // This is an idle cycle. The value on the PPU address bus during this cycle appears to be the same CHR
+                // address that is later used to fetch the low background tile byte starting at dot 5 (possibly calculated
+                // during the two unused NT fetches at the end of the previous scanline). 
+                if (_scanline == -1 && _cycle == 1)
+                {
+                    _statusRegister.Reset();
                 }
-                case (RenderState.Render):
-                {
-                    if (_currentCycle is > 0 and <= ScanLineVisibleDots)
-                    {
-                        byte backgroundColour = 0;
-                        byte spriteColour = 0;
-                        bool backgroundOpaque = false;
-                        bool spriteOpaque = false;
-                        bool spriteForeground = false;
-                        
-                        int x = _currentCycle - 1;
-                        int y = _currentScanline;
 
-                        if (_showBackground)
-                        {
-                            var fineX = (_fineX + x) % 8;
-                            
-                            
-                            
-                            Screen[x + y * 256] = NesColor.Palette
-                        }
-                    }
-                    break;
+                // The data for each tile is fetched during this phase. Each memory access takes 2 PPU cycles to complete,
+                // and 4 must be performed per tile:
+                //     Nametable byte
+                //     Attribute table byte
+                //     Pattern table tile low
+                //     Pattern table tile high (+8 bytes from pattern table tile low)
+                //
+                // The data fetched from these accesses is placed into internal latches, and then fed to the appropriate
+                // shift registers when it's time to do so (every 8 cycles). Because the PPU can only fetch an attribute byte every 8 cycles,
+                // each sequential string of 8 pixels is forced to have the same palette attribute.
+                //
+                // Sprite 0 hit acts as if the image starts at cycle 2 (which is the same cycle that the shifters shift for the first time),
+                // so the sprite 0 flag will be raised at this point at the earliest. Actual pixel output is delayed further due to internal
+                // render pipelining, and the first pixel is output during cycle 4.
+                //
+                // The shifters are reloaded during ticks 9, 17, 25, ..., 257.
+                //
+                // Note: At the beginning of each scanline, the data for the first two tiles is already loaded into the
+                // shift registers (and ready to be rendered), so the first tile that gets fetched is Tile 3.
+                //
+                // While all of this is going on, sprite evaluation for the next scanline is taking place as a seperate process,
+                // independent to what's happening here. 
+                if (_cycle >= 1 && _cycle <= 256)
+                {
+                    
+                }
+            }
+
+            // PostRender Scanline
+            if (_scanline == 240)
+            {
+                
+            }
+
+            // Vertical blanking lines (241-260)
+            // The VBlank flag of the PPU is set at tick 1 (the second tick) of scanline 241, where the VBlank NMI also
+            // occurs. The PPU makes no memory accesses during these scanlines, so PPU memory can be freely accessed by
+            // the program. 
+            if (_scanline >= 241 && _scanline <= 260)
+            {
+                //Start VBlank if we have just entered the blanking phase
+                if (_scanline == 241 && _cycle == 1)
+                {
+                    _statusRegister.SetFlag(PpuStatusRegisterFlags.V);
+
+                    if (_controlRegister.HasFlag(PpuControlRegisterFlags.NonMaskableInterrupt))
+                        _enableNMI = true;
+                }
+            }
+
+            //advance to the next 'column'
+            _cycle++;
+            
+            //end of cycles
+            if (_cycle >= 341)
+            {
+                //reset cycles
+                _cycle = 0;
+                //advance to next 'row'
+                _scanline++;
+                
+                //if the next row is then we reset and start again.
+                if (_scanline >= 261)
+                {
+                    _scanline = -1;
+                    FrameComplete = true;
+                    _oddFrame = !_oddFrame;
                 }
             }
         }
@@ -298,22 +375,17 @@ namespace PolyNES.PPU
             _ppuData = 0;
         }
 
-        private Color GetPaletteColour(byte palette, byte pixel)
-        {
-            return NesColor.Palette[Read((ushort)(0x3F00 + (palette << 2) + pixel & 0x3F))];
-        }
-
         private void CartridgeLoaded()
         {
             if (!_cartridge.Header.NesFlags6.Mirroring)
             {
-                _nametable0 = _nametable1 = 0;
-                _nametable2 = _nametable3 = 0x400;
+                _nametable0Address = _nametable1Address = 0;
+                _nametable2Address = _nametable3Address = 0x400;
             }
             else
             {
-                _nametable0 = _nametable1 = 0;
-                _nametable1 = _nametable3 = 0x400;
+                _nametable0Address = _nametable1Address = 0;
+                _nametable1Address = _nametable3Address = 0x400;
             }
         }
     }
