@@ -2,10 +2,7 @@ using System;
 using Microsoft.Xna.Framework;
 using Poly6502.Microprocessor.Utilities;
 using PolyNES.Cartridge.Interfaces;
-using PolyNES.Extensions;
-using PolyNES.PPU.Data;
 using PolyNES.PPU.Enums;
-using PolyNES.PPU.Memory;
 using PolyNES.PPU.Registers;
 
 namespace PolyNES.PPU

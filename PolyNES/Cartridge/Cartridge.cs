@@ -1,10 +1,12 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using Microsoft.Xna.Framework;
 using Poly6502.Microprocessor.Utilities;
 using PolyNES.Cartridge.Flags.INES;
 using PolyNES.Cartridge.Interfaces;
 using PolyNES.Cartridge.Mappers;
+using PolyNES.PPU.Data;
 
 namespace PolyNES.Cartridge
 {
@@ -13,12 +15,17 @@ namespace PolyNES.Cartridge
     /// </summary>
     public class Cartridge : AbstractAddressDataBus, ICartridge
     {
+        private const int LeftPatternTableStartAddress = 0x000;
+        private const int LeftPatternTableEndAddress = 0x0FFF;
+
+        private const int RightPatternTableStartAddress = 0x1000;
+        private const int RightPatternTableEndAddress = 0x1FFF;
+        
         private readonly ICartridge _cartridge;
         private byte[] _cartridgeData;
         private bool _characterRamInUse;
 
         private IList<Action> _loadedObservers;
-
         public IMapper Mapper { get; private set; }
 
         public Header Header { get; }
@@ -32,10 +39,21 @@ namespace PolyNES.Cartridge
         public byte[] CharacterRamData { get; private set; }
         public bool CartridgeLoaded { get; private set; }
 
+        public byte[] LeftPatternTable;
+        public byte[] RightPatternTable;
+
+        public Color[] LeftPatternTableBuffer;
+        public Color[] RightPatternTableBuffer;
+
+        public Color[] CombinedPatternTable;
+        
         public Cartridge()
         {
             MinAddressableRange = 0x4020;
             MaxAddressableRange = 0xFFFF;
+            LeftPatternTable = new byte[LeftPatternTableEndAddress];
+            RightPatternTable = new byte[LeftPatternTableEndAddress];
+            CombinedPatternTable = new Color[0xFFFFF];
             Header = new Header();
 
             _loadedObservers = new List<Action>();
@@ -133,7 +151,36 @@ namespace PolyNES.Cartridge
                     break;
             }
 
+            //Fill the pattern tables
+            LeftPatternTable = CharacterRomData[LeftPatternTableStartAddress..LeftPatternTableEndAddress];
+            RightPatternTable = CharacterRomData[RightPatternTableStartAddress..RightPatternTableEndAddress];
+            
+            for (int r = 0; r < 256; r++) {
+                for (int col = 0; col < 128; col++) {
+                    int adr = (r / 8 * 0x100) + (r % 8) + (col / 8) * 0x10;
+                    int pixel = ((CharacterRomData[adr] >> (7-(col % 8))) & 1) + ((CharacterRomData[adr + 8] >> (7-(col % 8))) & 1) * 2;
 
+                    var index1 = (r * 128 * 3) + (col * 3);
+                    var index2 = (r * 128 * 3) + (col * 3) + 1;
+                    var index3 = (r * 128 * 3) + (col * 3) + 2;
+
+                    var something = 1;
+                    
+                    if (index1 >= CombinedPatternTable.Length ||
+                        index2 >= CombinedPatternTable.Length ||
+                        index3 >= CombinedPatternTable.Length)
+                    {
+                        something = 1;
+                    }
+
+                    something = 2 + something;
+                    
+                    CombinedPatternTable[index1]     = NesColor.Palette[pixel];
+                    CombinedPatternTable[index2] = NesColor.Palette[pixel];
+                    CombinedPatternTable[index3] = NesColor.Palette[pixel];
+                }
+            }
+            
             CartridgeLoaded = true;
 
             foreach (var observer in _loadedObservers)

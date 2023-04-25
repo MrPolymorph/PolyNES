@@ -12,11 +12,16 @@
         <PackageReference Include="NUnit" Version="3.13.1" />
         <PackageReference Include="NUnit3TestAdapter" Version="3.17.0" />
         <PackageReference Include="coverlet.collector" Version="3.0.2" />
-        <PackageReference Include="Poly6502.Microprocessor" Version="2.0.0" />
     </ItemGroup>
 
     <ItemGroup>
       <ProjectReference Include="..\PolyNES\PolyNES.csproj" />
+    </ItemGroup>
+
+    <ItemGroup>
+      <Reference Include="Poly6502.Microprocessor">
+        <HintPath>..\..\Poly6502\Poly6502.Microprocessor\bin\Debug\net6.0\Poly6502.Microprocessor.dll</HintPath>
+      </Reference>
     </ItemGroup>
 
 </Project>

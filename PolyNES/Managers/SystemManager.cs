@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Linq;
 using NodaTime;
 using Poly6502.Microprocessor;
 using Poly6502.Microprocessor.Interfaces;
@@ -12,7 +13,9 @@ namespace PolyNES.Managers
     public class SystemManager : ISystemManager
     {
         public bool OkToDraw;
-        private readonly M6502 _m6502;
+        public bool Run;
+        public readonly M6502 M6502;
+        public List<string> Disassembly;
         private readonly Poly2C02 _ppu;
         private readonly ICartridge _cartridge;
         private readonly IEnumerable<AbstractAddressDataBus> _databusDevices;
@@ -25,7 +28,7 @@ namespace PolyNES.Managers
         public SystemManager(M6502 microprocessor, ICartridge cartridge, Poly2C02 ppu, 
             IDataBusCompatible ram)
         {
-            _m6502 = microprocessor;
+            M6502 = microprocessor;
             _cartridge = cartridge;
             _ppu = ppu;
             _clock = SystemClock.Instance;
@@ -33,9 +36,9 @@ namespace PolyNES.Managers
             OkToDraw = false;
 
             //register everything with the cpu
-            _m6502.RegisterDevice(cartridge);
-            _m6502.RegisterDevice(ppu);
-            _m6502.RegisterDevice(ram as IAddressBusCompatible);
+            M6502.RegisterDevice(cartridge);
+            M6502.RegisterDevice(ppu);
+            M6502.RegisterDevice(ram as IAddressBusCompatible);
 
             //register ram and cartridge together
             cartridge.RegisterDevice(ppu);
@@ -52,7 +55,7 @@ namespace PolyNES.Managers
             //Powering on without a cartridge loaded should do nothing.
             if (_cartridge.CartridgeLoaded)
             {
-                _m6502.RES();
+                M6502.RES();
                 _ppu.RES();
             }
         }
@@ -60,10 +63,24 @@ namespace PolyNES.Managers
         public void LoadRom(string romLocation)
         {
             _cartridge.LoadCartridge(romLocation);
+            Disassembly = M6502.Disassemble(0xC000, 0xC66E).ToList();
             PowerOn();
             
             _cycleTime = _clock.GetCurrentInstant();
             _elapsed = _cycleTime - _cycleTime;
+        }
+
+        public void Reset()
+        {
+            M6502.RES(0xC000);
+        }
+
+        public void StepSystem()
+        {
+            _ppu.Clock();
+            _ppu.Clock();
+            _ppu.Clock();
+            M6502.Clock();
         }
         
         public bool ClockSystem()
@@ -73,10 +90,13 @@ namespace PolyNES.Managers
             //
             // while (_elapsed > _cpuCycleDuration)
             // {
+            if (Run)
+            {
                 _ppu.Clock();
                 _ppu.Clock();
                 _ppu.Clock();
-                _m6502.Clock();
+                M6502.Clock();
+            }
 
             //     OkToDraw = _ppu.FrameComplete;
             //     _elapsed -= _cpuCycleDuration;
@@ -88,7 +108,7 @@ namespace PolyNES.Managers
 
         private void CartridgeLoaded()
         {
-            _m6502.RES();
+            M6502.RES();
             _ppu.RES();
         }
         
