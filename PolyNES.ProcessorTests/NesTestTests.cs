@@ -43,9 +43,9 @@ namespace PolyNES.ProcessorTests
 
                 _logLines = new List<LogLine>();
                 _opCodePassFail = new List<OpCodeVerification>();
-
-                _cartridge.LoadCartridge("/Users/Kris/Documents/ROMS/NES/nestest.nes");
-                _logLines = LoadLog("/Users/Kris/Documents/ROMS/NES/nestest.log");
+                
+                _cartridge.LoadCartridge("/home/kris/Documents/ROMS/NES/nestest.nes");
+                _logLines = LoadLog("/home/kris/Documents/ROMS/NES/nestest.log");
 
                 _m6502.RES(0xC000);
             }

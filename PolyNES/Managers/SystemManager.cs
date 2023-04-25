@@ -63,7 +63,7 @@ namespace PolyNES.Managers
         public void LoadRom(string romLocation)
         {
             _cartridge.LoadCartridge(romLocation);
-            Disassembly = M6502.Disassemble(0xC000, 0xC66E).ToList();
+            Disassembly = M6502.Disassemble(0xC000, 0xFB77).ToList();
             PowerOn();
             
             _cycleTime = _clock.GetCurrentInstant();

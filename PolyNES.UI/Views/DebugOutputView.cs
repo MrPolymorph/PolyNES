@@ -44,13 +44,13 @@ public class DebugOutputView
             
             
         sb.DrawString(_systemFont, $"PC: $0x{_cpu.Pc:X4}", new Vector2(baseX + 64, baseY + 25), Color.White);
-        sb.DrawString(_systemFont, $"Stack P: $0x{_cpu.SP:X2}", new Vector2(baseX + 64, baseY + 45), Color.White);
-        sb.DrawString(_systemFont, $"Adr: $0x{_cpu.AddressBusAddress:X4} ", new Vector2(baseX + 64, baseY + 65), Color.White);
+        sb.DrawString(_systemFont, $"Stack P: 0x{_cpu.SP:X2}", new Vector2(baseX + 64, baseY + 45), Color.White);
+        sb.DrawString(_systemFont, $"Adr: 0x{_cpu.AddressBusAddress:X4} ", new Vector2(baseX + 64, baseY + 65), Color.White);
             
-        sb.DrawString(_systemFont, $"A: $0x{_cpu.A:X2} ", new Vector2(baseX + 170, baseY + 65), Color.White);
-        sb.DrawString(_systemFont, $"X: $0x{_cpu.X:X2} ", new Vector2(baseX + 260, baseY + 65), Color.White);
-        sb.DrawString(_systemFont, $"Y: $0x{_cpu.Y:X2} ", new Vector2(baseX + 350, baseY + 65), Color.White);
-        sb.DrawString(_systemFont, $"Status: $0x{_cpu.P:X2} ", new Vector2(baseX + 450, baseY + 65), Color.White);
+        sb.DrawString(_systemFont, $"A: 0x{_cpu.A:X2} ", new Vector2(baseX + 170, baseY + 65), Color.White);
+        sb.DrawString(_systemFont, $"X: 0x{_cpu.X:X2} ", new Vector2(baseX + 260, baseY + 65), Color.White);
+        sb.DrawString(_systemFont, $"Y: 0x{_cpu.Y:X2} ", new Vector2(baseX + 350, baseY + 65), Color.White);
+        sb.DrawString(_systemFont, $"Status: {_cpu.P:X2} ", new Vector2(baseX + 450, baseY + 65), Color.White);
     }
     
     public void DrawFps(SpriteBatch sb, float fps)
