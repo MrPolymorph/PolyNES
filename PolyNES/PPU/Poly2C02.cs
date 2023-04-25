@@ -42,7 +42,7 @@ namespace PolyNES.PPU
         public readonly Color[] Screen;
         public bool FrameComplete;
         
-        private readonly ICartridge _cartridge;
+        private readonly Cartridge.Cartridge _cartridge;
         private readonly Random _random;
         private RenderState _currentRenderState;
         private ushort _nametable0Address, _nametable1Address, _nametable2Address, _nametable3Address;
@@ -66,7 +66,7 @@ namespace PolyNES.PPU
         private byte _ppuData;
         #endregion
 
-        public Poly2C02(ICartridge cartridge)
+        public Poly2C02(Cartridge.Cartridge cartridge)
         {
             FrameComplete = false;
             _cartridge = cartridge;
@@ -354,6 +354,48 @@ namespace PolyNES.PPU
                     _oddFrame = !_oddFrame;
                 }
             }
+        }
+
+        public void DrawPatternTable()
+        {
+            for (int i = 0; i < _cartridge.LeftPatternTable.Length; i++)
+            {
+                var tile = _cartridge.LeftPatternTable[i];
+                var plane0 = tile & 0x0F;
+                var plane1 = tile & 0xF0;
+                var colorIndex = 1;
+                
+                //If neither bit is set to 1: The pixel is background/transparent.
+                //If only the bit in the first plane is set to 1: The pixel's color index is 1.
+                if (plane0 == 1 && plane1 == 0)
+                    colorIndex = 1;
+                //If only the bit in the second plane is set to 1: The pixel's color index is 2.
+                if (plane0 == 0 && plane1 == 1)
+                    colorIndex = 2;
+                if (plane0 == 1 && plane1 == 1)
+                    colorIndex = 3;
+            }
+            
+            for (int r = 0; r < 960; r++) {
+                for (int col = 0; col < 256; col++) {
+                    var tile_id = ((r / 8) * 32) + (col / 8);												//	sequential tile number
+                    var tile_nr = _cartridge.Read((ushort)(0x2000 + (r / 8 * 32) + (col / 8)));									//	tile ID at the current address
+                    var backgroundPatternTableAddress = _controlRegister.HasFlag(PpuControlRegisterFlags.BackgroundPatternTableAddress) ? 0x1000 : 0x000;
+                    ushort adr = (ushort)(backgroundPatternTableAddress + (tile_nr * 0x10) + (r % 8));	//address of the tile in CHR RAM
+
+                    //	select the correct byte of the attribute table
+                    var tile_attr_nr = Read((ushort)(((0x2000 + (r / 8 * 32) + (col / 8)) & 0xfc00) + 0x03c0 + ((r / 32) * 8) + (col / 32)));
+                    //	select the part of the byte that we need (2-bits)
+                    var attr_shift = (((tile_id % 32) / 2 % 2) + (tile_id / 64 % 2) * 2) * 2;
+                    var palette_offset = ((tile_attr_nr >> attr_shift) & 0x3) * 4;
+                    var pixel = ((Read(adr) >> (7 - (col % 8))) & 1) + (((Read((ushort)(adr + 8)) >> (7 - (col % 8))) & 1) * 2);
+                    framebuffer[(r * 256 * 3) + (col * 3)] = (PALETTE[VRAM[0x3f00 + palette_offset + pixel]] >> 16) & 0xff;
+                    framebuffer[(r * 256 * 3) + (col * 3) + 1] = (PALETTE[VRAM[0x3f00 + palette_offset + pixel]] >> 8) & 0xff;
+                    framebuffer[(r * 256 * 3) + (col * 3) + 2] = (PALETTE[VRAM[0x3f00 + palette_offset + pixel]]) & 0xff;
+
+                }
+            }
+
         }
 
         public override void SetRW(bool rw)

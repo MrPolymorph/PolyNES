@@ -15,12 +15,6 @@ namespace PolyNES.Cartridge
     /// </summary>
     public class Cartridge : AbstractAddressDataBus, ICartridge
     {
-        private const int LeftPatternTableStartAddress = 0x000;
-        private const int LeftPatternTableEndAddress = 0x0FFF;
-
-        private const int RightPatternTableStartAddress = 0x1000;
-        private const int RightPatternTableEndAddress = 0x1FFF;
-        
         private readonly ICartridge _cartridge;
         private byte[] _cartridgeData;
         private bool _characterRamInUse;
@@ -51,8 +45,8 @@ namespace PolyNES.Cartridge
         {
             MinAddressableRange = 0x4020;
             MaxAddressableRange = 0xFFFF;
-            LeftPatternTable = new byte[LeftPatternTableEndAddress];
-            RightPatternTable = new byte[LeftPatternTableEndAddress];
+            LeftPatternTable = new byte[0xFFF];
+            RightPatternTable = new byte[0xFFF];
             CombinedPatternTable = new Color[0xFFFFF];
             Header = new Header();
 
@@ -152,33 +146,29 @@ namespace PolyNES.Cartridge
             }
 
             //Fill the pattern tables
-            LeftPatternTable = CharacterRomData[LeftPatternTableStartAddress..LeftPatternTableEndAddress];
-            RightPatternTable = CharacterRomData[RightPatternTableStartAddress..RightPatternTableEndAddress];
-            
-            for (int r = 0; r < 256; r++) {
-                for (int col = 0; col < 128; col++) {
-                    int adr = (r / 8 * 0x100) + (r % 8) + (col / 8) * 0x10;
-                    int pixel = ((CharacterRomData[adr] >> (7-(col % 8))) & 1) + ((CharacterRomData[adr + 8] >> (7-(col % 8))) & 1) * 2;
+            LeftPatternTable = CharacterRomData[0x0..0x0FFF];
+            RightPatternTable = CharacterRomData[0x1000..0x1FFF];
 
-                    var index1 = (r * 128 * 3) + (col * 3);
-                    var index2 = (r * 128 * 3) + (col * 3) + 1;
-                    var index3 = (r * 128 * 3) + (col * 3) + 2;
+            var colorTable = new Color[0xFFF];
 
-                    var something = 1;
-                    
-                    if (index1 >= CombinedPatternTable.Length ||
-                        index2 >= CombinedPatternTable.Length ||
-                        index3 >= CombinedPatternTable.Length)
-                    {
-                        something = 1;
-                    }
-
-                    something = 2 + something;
-                    
-                    CombinedPatternTable[index1]     = NesColor.Palette[pixel];
-                    CombinedPatternTable[index2] = NesColor.Palette[pixel];
-                    CombinedPatternTable[index3] = NesColor.Palette[pixel];
-                }
+            for (int i = 0; i < LeftPatternTable.Length; i++)
+            {
+                var tile = LeftPatternTable[i];
+                var plane0 = tile & 0x0F;
+                var plane1 = tile & 0xF0;
+                var colorIndex = 1;
+                
+                //If neither bit is set to 1: The pixel is background/transparent.
+                //If only the bit in the first plane is set to 1: The pixel's color index is 1.
+                if (plane0 == 1 && plane1 == 0)
+                    colorIndex = 1;
+                //If only the bit in the second plane is set to 1: The pixel's color index is 2.
+                if (plane0 == 0 && plane1 == 1)
+                    colorIndex = 2;
+                if (plane0 == 1 && plane1 == 1)
+                    colorIndex = 3;
+                
+                
             }
             
             CartridgeLoaded = true;

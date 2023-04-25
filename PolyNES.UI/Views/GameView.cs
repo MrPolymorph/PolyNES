@@ -40,8 +40,7 @@ namespace PolyNES.UI.Views
             _ppu = new Poly2C02(_cartridge);
             _workRam = new WorkRam();
             _systemManager = new SystemManager(_cpu, _cartridge, _ppu, _workRam);
-            _systemManager.LoadRom(Environment.GetCommandLineArgs()[1]);
-            
+
             _cpu = cpu;
             _emulate = true;
             _stateManager = stateManager;

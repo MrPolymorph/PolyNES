@@ -79,7 +79,6 @@ namespace PolyNES.UI.Managers
             if (_currentState == GameState.LoadRom)
             {
                 _systemManager.Reset();
-                _systemManager.LoadRom(rom);
                 _currentState = GameState.Running;
             }
 
