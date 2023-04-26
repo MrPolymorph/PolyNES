@@ -16,7 +16,7 @@ namespace PolyNES.Managers
         public bool Run;
         public readonly M6502 M6502;
         public List<string> Disassembly;
-        private readonly Poly2C02 _ppu;
+        public readonly Poly2C02 PPU;
         private readonly ICartridge _cartridge;
         private readonly IEnumerable<AbstractAddressDataBus> _databusDevices;
         private Duration _cpuCycleDuration;
@@ -30,7 +30,7 @@ namespace PolyNES.Managers
         {
             M6502 = microprocessor;
             _cartridge = cartridge;
-            _ppu = ppu;
+            PPU = ppu;
             _clock = SystemClock.Instance;
             _cpuCycleDuration = Duration.FromNanoseconds(559);
             OkToDraw = false;
@@ -46,8 +46,8 @@ namespace PolyNES.Managers
             cartridge.RegisterCartridgeLoadedCallback(CartridgeLoaded);
             
             //register the cartridge with the ppu
-            _ppu.RegisterDevice(cartridge);
-            _ppu.RegisterDevice(ram as IAddressBusCompatible);
+            PPU.RegisterDevice(cartridge);
+            PPU.RegisterDevice(ram as IAddressBusCompatible);
         }
 
         public void PowerOn()
@@ -56,7 +56,7 @@ namespace PolyNES.Managers
             if (_cartridge.CartridgeLoaded)
             {
                 M6502.RES();
-                _ppu.RES();
+                PPU.RES();
             }
         }
 
@@ -77,10 +77,12 @@ namespace PolyNES.Managers
 
         public void StepSystem()
         {
-            _ppu.Clock();
-            _ppu.Clock();
-            _ppu.Clock();
+            PPU.Clock();
+            PPU.Clock();
+            PPU.Clock();
             M6502.Clock();
+            PPU.DrawPatternTable(0, 0);
+            PPU.DrawPatternTable(1, 0);
         }
         
         public bool ClockSystem()
@@ -92,10 +94,12 @@ namespace PolyNES.Managers
             // {
             if (Run)
             {
-                _ppu.Clock();
-                _ppu.Clock();
-                _ppu.Clock();
+                PPU.Clock();
+                PPU.Clock();
+                PPU.Clock();
                 M6502.Clock();
+                PPU.DrawPatternTable(0, 0);
+                PPU.DrawPatternTable(1, 0);
             }
 
             //     OkToDraw = _ppu.FrameComplete;
@@ -109,7 +113,7 @@ namespace PolyNES.Managers
         private void CartridgeLoaded()
         {
             M6502.RES();
-            _ppu.RES();
+            PPU.RES();
         }
         
     }

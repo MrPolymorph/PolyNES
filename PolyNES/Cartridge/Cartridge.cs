@@ -203,7 +203,7 @@ namespace PolyNES.Cartridge
 
             return 0;
         }
-
+        
         public override void Write(ushort address, byte data)
         {
             if (!CartridgeLoaded)

@@ -39,7 +39,7 @@ namespace PolyNES.UI.Managers
             
             _keyboardManager = new KeyboardManager();
             _mainMenuView = new MainMenuView(this, font, _keyboardManager, gd);
-            _debugOutputView = new DebugOutputView(font, _keyboardManager, _systemManager);
+            _debugOutputView = new DebugOutputView(font, gd, _keyboardManager, _systemManager);
             _gameView = new GameView(this, gd, _keyboardManager, _cpu);
             _fps = 0;
             _currentState = GameState.Debug;

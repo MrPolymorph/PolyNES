@@ -5,6 +5,7 @@ using Microsoft.Xna.Framework.Graphics;
 using Microsoft.Xna.Framework.Input;
 using Poly6502.Microprocessor;
 using PolyNES.Managers;
+using PolyNES.PPU;
 using PolyNES.UI.Managers;
 
 namespace PolyNES.UI.Views;
@@ -15,14 +16,20 @@ public class DebugOutputView
     private SystemManager _systemManager;
     private KeyboardManager _keyboardManager;
     private M6502 _cpu;
+    private Poly2C02 _ppu;
     private bool _emulate;
+    private Texture2D _leftPatternTable;
+    private Texture2D _rightPatternTable;
     
-    public DebugOutputView(SpriteFont font, KeyboardManager keyboardManager, SystemManager systemManager)
+    public DebugOutputView(SpriteFont font, GraphicsDevice gd, KeyboardManager keyboardManager, SystemManager systemManager)
     {
         _systemFont = font;
         _systemManager = systemManager;
         _cpu = systemManager.M6502;
+        _ppu = systemManager.PPU;
         _emulate = false;
+        _leftPatternTable = new Texture2D(gd, 128, 128, false, SurfaceFormat.Dxt3);
+        _rightPatternTable = new Texture2D(gd, 128, 128, false, SurfaceFormat.Dxt3);
         
         keyboardManager.SubscribeForKeyDown(Keys.Space, () =>
         {
@@ -117,6 +124,18 @@ public class DebugOutputView
             
         }
     }
+
+    private void DrawLeftPatternTable(SpriteBatch sb)
+    {
+        _leftPatternTable.SetData(_ppu.LeftPatternTableView, 0, Poly2C02.PatternTableSize);
+        _rightPatternTable.SetData(_ppu.RightPatternTableView, 0, Poly2C02.PatternTableSize);
+        
+        sb.Draw(_leftPatternTable, new Vector2(400, 320), new Rectangle(0, 0, 128, 128),
+            Color.White, 0.0f, new Vector2(0, 0), 5f, SpriteEffects.None, 0f);
+        
+        // sb.Draw(_rightPatternTable, new Vector2(400, 320), new Rectangle(0, 0, 128, 128),
+        //     Color.White, 0.0f, new Vector2(0, 0), 5f, SpriteEffects.None, 0f);
+    }
     
     private void PrintDisassemblyLine(string line, int x, int y, Color color, SpriteBatch sb)
     {
@@ -133,6 +152,7 @@ public class DebugOutputView
         //DrawRam(sb);
         DrawRegisters(sb);
         DrawFps(sb, fps);
+        DrawLeftPatternTable(sb);
         _systemManager.ClockSystem();
     }
 }

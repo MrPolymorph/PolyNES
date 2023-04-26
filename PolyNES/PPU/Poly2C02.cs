@@ -1,8 +1,6 @@
-using System;
 using Microsoft.Xna.Framework;
 using Poly6502.Microprocessor.Utilities;
-using PolyNES.Cartridge.Interfaces;
-using PolyNES.PPU.Enums;
+using PolyNES.PPU.Data;
 using PolyNES.PPU.Registers;
 
 namespace PolyNES.PPU
@@ -36,20 +34,25 @@ namespace PolyNES.PPU
     /// </summary>
     public class Poly2C02 : AbstractAddressDataBus
     {
+        public const int PatternTableSize = 0x1000;
         private const int MaxPPUCycles = 340;
         private const int ScanLineVisibleDots = 256;
-     
+        private const int NesScreenWidth = 256;
+        private const int NesScreenHeight = 240;
+        private const int PatternTableSizeInPixels = 128;
+        private const int PatternTableRowSize = 256;
+        private const int NesTilePixelSize = 8;
+        private const int NesTileSize = 16;
+        private const int NesPaletteStartAddress = 0x3F00;
+
         public readonly Color[] Screen;
+        public readonly Color[] LeftPatternTableView;
+        public readonly Color[] RightPatternTableView;
         public bool FrameComplete;
         
         private readonly Cartridge.Cartridge _cartridge;
-        private readonly Random _random;
-        private RenderState _currentRenderState;
-        private ushort _nametable0Address, _nametable1Address, _nametable2Address, _nametable3Address;
-        private byte _horizontalLatch, _verticalLatch;
-        private byte[] _paletteTable;
-        private Color[] _nametable0;
-        private Color[] _nametable1;
+        private readonly byte[] _paletteTable;
+        private readonly byte[][] _patternTable;
         private int _scanline;
         private int _cycle;
         private bool _oddFrame;
@@ -69,6 +72,9 @@ namespace PolyNES.PPU
         public Poly2C02(Cartridge.Cartridge cartridge)
         {
             FrameComplete = false;
+            Screen = new Color[NesScreenWidth * NesScreenHeight];
+            LeftPatternTableView = new Color[PatternTableSize];
+            RightPatternTableView = new Color[PatternTableSize];
             _cartridge = cartridge;
             _cartridge.RegisterCartridgeLoadedCallback(CartridgeLoaded);
             _controlRegister = new PpuControlRegister();
@@ -76,20 +82,28 @@ namespace PolyNES.PPU
             _statusRegister = new PpuStatusRegister();
             _scrollRegister = new PpuScrollRegister();
             _paletteTable = new byte[32];
-            Screen = new Color[256 * 240];
-            _currentRenderState = RenderState.PreRender;
+            _patternTable = new[]
+            {
+                new byte[PatternTableSize],
+                new byte[PatternTableSize]
+            };
+            
             _oddFrame = false;
             _enableNMI = false;
             _scanline = 0;
             _scanline = 0;
-            _horizontalLatch = 0;
-            _verticalLatch = 0;
-            _nametable0 = new Color[256 * 240];
-            _nametable1 = new Color[256 * 240];
+            
+            //initialise Pattern Table
+            for (int i = 0; i < PatternTableSize; i++)
+            {
+                LeftPatternTableView[i] = Color.White;
+                RightPatternTableView[i] = Color.White;
+            }
         }
 
         public override byte Read(ushort address, bool ronly = false)
         {
+            SetPropagation(true);
             if (address >= 0x2000 && address <= 0x3EFF)
             {
                 //check if its one of our registers
@@ -129,27 +143,23 @@ namespace PolyNES.PPU
                     }
                     case (0x2007): //PPU Data
                     {
+                        PpuWrite(vram_addr.reg, data);
+                        // All writes from PPU data automatically increment the nametable
+                        // address depending upon the mode set in the control register.
+                        // If set to vertical mode, the increment is 32, so it skips
+                        // one whole nametable row; in horizontal mode it just increments
+                        // by 1, moving to the next column
+                        vram_addr.reg += (control.increment_mode ? 32 : 1);
+                        break;
                         return _ppuData;
                     }
                 }
             }
 
-            //Palette memory address range
-            if (address >= 0x3F00 && address <= 0x3FFF)
-            {
-                address &= 0x001F;
-                if (address == 0x0010) address = 0x0000;
-                if (address == 0x0014) address = 0x0004;
-                if (address == 0x0018) address = 0x0008;
-                if (address == 0x001C) address = 0x000C;
-                return (byte) (_paletteTable[address] & 
-                               (_maskRegister.HasFlag(PpuMaskRegisterFlags.Greyscale) ? 0x30 : 0x3F));
-            }
-
             SetPropagation(false);
             return 0;
         }
-        
+
         /// <summary>
         /// The PPU exposes eight memory-mapped registers to the CPU. These nominally sit at $2000 through $2007
         /// in the CPU's address space, but because they're incompletely decoded, they're mirrored in every 8 bytes
@@ -159,6 +169,7 @@ namespace PolyNES.PPU
         /// <param name="data"></param>
         public override void Write(ushort address, byte data)
         {
+            //Register Ranges
             if (address >= 0x2000 && address <= 0x3EFF)
             {
                 //check if its one of our registers
@@ -209,7 +220,20 @@ namespace PolyNES.PPU
                     }
                 }
             }
+        }
 
+        private void PpuWrite(ushort address, byte data)
+        {
+            address &= 0x3FFF;
+            
+            //Pattern table range
+            if (address >= 0 && address <= 0x1FFF)
+            {
+                var patternTableIndex = (address & PatternTableSize) >> 12; //left or right hand pattern table from the msb;
+                var patternTableOffset = address & 0x0FFF; //read the rest of the data from the address to get the offset
+                _patternTable[patternTableIndex][patternTableOffset] = data;
+            }
+            
             //Palette memory address range
             if (address >= 0x3F00 && address <= 0x3FFF)
             {
@@ -220,8 +244,30 @@ namespace PolyNES.PPU
                 if (address == 0x001C) address = 0x000C;
                 _paletteTable[address] = data;
             }
+        }
 
+        private byte PpuRead(ushort address)
+        {
+            //Pattern table range
+            if (address >= 0 && address <= 0x1FFF)
+            {
+                var patternTableIndex = (address & PatternTableSize) >> 12; //left or right hand pattern table from the msb;
+                var patternTableOffset = address & 0x0FFF; //read the rest of the data from the address to get the offset
+                return _patternTable[patternTableIndex][patternTableOffset];
+            }
+            //Palette memory address range
+            if (address >= 0x3F00 && address <= 0x3FFF)
+            {
+                address &= 0x001F;
+                if (address == 0x0010) address = 0x0000;
+                if (address == 0x0014) address = 0x0004;
+                if (address == 0x0018) address = 0x0008;
+                if (address == 0x001C) address = 0x000C;
+                return (byte) (_paletteTable[address] & 
+                               (_maskRegister.HasFlag(PpuMaskRegisterFlags.Greyscale) ? 0x30 : 0x3F));
+            }
 
+            return 0;
         }
 
         /// <summary>
@@ -356,46 +402,66 @@ namespace PolyNES.PPU
             }
         }
 
-        public void DrawPatternTable()
+        public void DrawPatternTable(int patternTableSelector, byte palleteId)
         {
-            for (int i = 0; i < _cartridge.LeftPatternTable.Length; i++)
+            for (int tileX = 0; tileX < NesTileSize; tileX++)
             {
-                var tile = _cartridge.LeftPatternTable[i];
-                var plane0 = tile & 0x0F;
-                var plane1 = tile & 0xF0;
-                var colorIndex = 1;
-                
-                //If neither bit is set to 1: The pixel is background/transparent.
-                //If only the bit in the first plane is set to 1: The pixel's color index is 1.
-                if (plane0 == 1 && plane1 == 0)
-                    colorIndex = 1;
-                //If only the bit in the second plane is set to 1: The pixel's color index is 2.
-                if (plane0 == 0 && plane1 == 1)
-                    colorIndex = 2;
-                if (plane0 == 1 && plane1 == 1)
-                    colorIndex = 3;
-            }
-            
-            for (int r = 0; r < 960; r++) {
-                for (int col = 0; col < 256; col++) {
-                    var tile_id = ((r / 8) * 32) + (col / 8);												//	sequential tile number
-                    var tile_nr = _cartridge.Read((ushort)(0x2000 + (r / 8 * 32) + (col / 8)));									//	tile ID at the current address
-                    var backgroundPatternTableAddress = _controlRegister.HasFlag(PpuControlRegisterFlags.BackgroundPatternTableAddress) ? 0x1000 : 0x000;
-                    ushort adr = (ushort)(backgroundPatternTableAddress + (tile_nr * 0x10) + (r % 8));	//address of the tile in CHR RAM
+                for (int tileY = 0; tileY < NesTileSize; tileY++)
+                {
+                    // each tile is 8x8 pixels at 2bits per pixel = 16.
+                    // for any given row in the pattern table there are 16 of these tiles 
+                    // that gives us 16 bytes by 16 tiles = 256
+                    // all this together gives us our index 
+                    var patternTableOffset = tileY * PatternTableRowSize + tileX * NesTileSize;
+                    
+                    //now for each tile we have 8 rows with 8 pixels (64 pixels in total)
+                    //lets go round them for this particular tile
+                    for (int pixelRow = 0; pixelRow < NesTilePixelSize; pixelRow++)
+                    {
+                        //get the least significant byte plane for the tile.
+                        //this address formula is basically: left table or right table * the size of that table (4KB)
+                        //The offset into that table + the current byte row  ;
+                        ushort address = (ushort)(patternTableSelector * PatternTableSize + patternTableOffset + pixelRow);
+                        var loByte = PpuRead(address);
+                        var hiByte = PpuRead((ushort)(address + 8));
 
-                    //	select the correct byte of the attribute table
-                    var tile_attr_nr = Read((ushort)(((0x2000 + (r / 8 * 32) + (col / 8)) & 0xfc00) + 0x03c0 + ((r / 32) * 8) + (col / 32)));
-                    //	select the part of the byte that we need (2-bits)
-                    var attr_shift = (((tile_id % 32) / 2 % 2) + (tile_id / 64 % 2) * 2) * 2;
-                    var palette_offset = ((tile_attr_nr >> attr_shift) & 0x3) * 4;
-                    var pixel = ((Read(adr) >> (7 - (col % 8))) & 1) + (((Read((ushort)(adr + 8)) >> (7 - (col % 8))) & 1) * 2);
-                    framebuffer[(r * 256 * 3) + (col * 3)] = (PALETTE[VRAM[0x3f00 + palette_offset + pixel]] >> 16) & 0xff;
-                    framebuffer[(r * 256 * 3) + (col * 3) + 1] = (PALETTE[VRAM[0x3f00 + palette_offset + pixel]] >> 8) & 0xff;
-                    framebuffer[(r * 256 * 3) + (col * 3) + 2] = (PALETTE[VRAM[0x3f00 + palette_offset + pixel]]) & 0xff;
+                        for (int pixelColumn = 0; pixelColumn < NesTilePixelSize; pixelColumn++)
+                        {
+                            //we only want the lest significant bit from both planes
+                            byte pixelId = (byte)((hiByte & 0x01) << 1 | (loByte & 0x01));
+                            
+                            //Shift each time we loop so that we read the least significant bit each time
+                            loByte >>= 1;
+                            hiByte >>= 1;
 
+                            //we want to draw starting top left, so we invert our start index.
+                            var patternTablePixelXPosition = tileX * 8 + (7 - pixelColumn);
+                            var patternTablePixelYPosition = tileY * 8 + pixelRow;
+                            
+                            var patternTableIndex = patternTablePixelXPosition + patternTablePixelYPosition;
+                            var pixelColour = GetPaletteColor(palleteId, pixelId);
+
+                            if (patternTableSelector == 0)
+                            {
+                                LeftPatternTableView[patternTableIndex] = pixelColour;
+                            }
+                            else
+                            {
+                                RightPatternTableView[patternTableIndex] = pixelColour;
+                            }
+
+                        }
+                    }
                 }
             }
+        }
 
+        private Color GetPaletteColor(byte paletteId, byte pixelId)
+        {
+            ushort address = (ushort)(NesPaletteStartAddress + (paletteId << 4) + pixelId);
+            byte paletteIndex = _cartridge.Read(address);
+
+            return NesColor.Palette[paletteIndex];
         }
 
         public override void SetRW(bool rw)
@@ -416,16 +482,16 @@ namespace PolyNES.PPU
 
         private void CartridgeLoaded()
         {
-            if (!_cartridge.Header.NesFlags6.Mirroring)
-            {
-                _nametable0Address = _nametable1Address = 0;
-                _nametable2Address = _nametable3Address = 0x400;
-            }
-            else
-            {
-                _nametable0Address = _nametable1Address = 0;
-                _nametable1Address = _nametable3Address = 0x400;
-            }
+            // if (!_cartridge.Header.NesFlags6.Mirroring)
+            // {
+            //     _nametable0Address = _nametable1Address = 0;
+            //     _nametable2Address = _nametable3Address = 0x400;
+            // }
+            // else
+            // {
+            //     _nametable0Address = _nametable1Address = 0;
+            //     _nametable1Address = _nametable3Address = 0x400;
+            // }
         }
     }
 }
