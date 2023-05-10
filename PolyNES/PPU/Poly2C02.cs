@@ -1,6 +1,8 @@
+using System;
 using Microsoft.Xna.Framework;
 using Poly6502.Microprocessor.Utilities;
 using PolyNES.PPU.Data;
+using PolyNES.PPU.Memory;
 using PolyNES.PPU.Registers;
 
 namespace PolyNES.PPU
@@ -57,6 +59,15 @@ namespace PolyNES.PPU
         private int _cycle;
         private bool _oddFrame;
         private bool _enableNMI;
+        private byte[] SpriteShifterPatternLo;
+        private byte[] SpriteShifterPatternHi;
+        private byte BackgroundShifterPatternLo;
+        private byte BackgroundShifterPatternHi;
+        private byte BackgroundShifterAttributeLo;
+        private byte BackgroundShifterAttributeHi;
+        private ObjectAttribute[] _spriteScanLine;
+        private ObjectAttribute[] _oam;
+        
         
         #region Registers
         private readonly PpuControlRegister _controlRegister;
@@ -65,6 +76,7 @@ namespace PolyNES.PPU
         private byte _oamAddress;
         private byte _oamData;
         private readonly PpuScrollRegister _scrollRegister;
+        private readonly PpuScrollRegister _transferScrollRegister;
         private byte _ppuAddress;
         private byte _ppuData;
         #endregion
@@ -75,12 +87,15 @@ namespace PolyNES.PPU
             Screen = new Color[NesScreenWidth * NesScreenHeight];
             LeftPatternTableView = new Color[PatternTableSize];
             RightPatternTableView = new Color[PatternTableSize];
+            _spriteScanLine = new ObjectAttribute[8];
+            _oam = new ObjectAttribute[64];
             _cartridge = cartridge;
             _cartridge.RegisterCartridgeLoadedCallback(CartridgeLoaded);
             _controlRegister = new PpuControlRegister();
             _maskRegister = new PpuMaskRegister();
             _statusRegister = new PpuStatusRegister();
             _scrollRegister = new PpuScrollRegister();
+            _transferScrollRegister = new PpuScrollRegister();
             _paletteTable = new byte[32];
             _patternTable = new[]
             {
@@ -143,15 +158,7 @@ namespace PolyNES.PPU
                     }
                     case (0x2007): //PPU Data
                     {
-                        PpuWrite(vram_addr.reg, data);
-                        // All writes from PPU data automatically increment the nametable
-                        // address depending upon the mode set in the control register.
-                        // If set to vertical mode, the increment is 32, so it skips
-                        // one whole nametable row; in horizontal mode it just increments
-                        // by 1, moving to the next column
-                        vram_addr.reg += (control.increment_mode ? 32 : 1);
-                        break;
-                        return _ppuData;
+	                    return _ppuAddress;
                     }
                 }
             }
@@ -216,7 +223,17 @@ namespace PolyNES.PPU
                     }
                     case (2007): //PPU Data
                     {
-                        break;
+	                    PpuWrite(_scrollRegister.Register, data);
+	                    // All writes from PPU data automatically increment the nametable
+	                    // address depending upon the mode set in the control register.
+	                    // If set to vertical mode, the increment is 32, so it skips
+	                    // one whole nametable row; in horizontal mode it just increments
+	                    // by 1, moving to the next column
+	                    byte incrementAmount;
+	                    incrementAmount = (byte) (_controlRegister.HasFlag(PpuControlRegisterFlags.PpuIncrement) ? 32 : 1);
+	                    
+	                    _scrollRegister.Register += incrementAmount;
+	                    break;
                     }
                 }
             }
@@ -303,104 +320,689 @@ namespace PolyNES.PPU
         /// PAL NES PPUs render 70 vblank scanlines instead of 20, and they additionally run 3.2 PPU cycles per CPU cycle,
         /// or 106.5625 CPU clock cycles per scanline.
         /// </summary>
-        public override void Clock()
+        // public override void Clock()
+        // {
+        //     /* This is a dummy scanline, whose sole purpose is to fill the shift registers with the data for the first
+        //        two tiles of the next scanline. Although no pixels are rendered for this scanline, the PPU still makes
+        //        the same memory accesses it would for a regular scanline.
+        //        
+        //        This scanline varies in length, depending on whether an even or an odd frame is being rendered. For odd
+        //        frames, the cycle at the end of the scanline is skipped (this is done internally by jumping directly
+        //        from (339,261) to (0,0), replacing the idle tick at the beginning of the first visible scanline with the
+        //        last tick of the last dummy nametable fetch). For even frames, the last cycle occurs normally. This is
+        //        done to compensate for some shortcomings with the way the PPU physically outputs its video signal, the
+        //        end result being a crisper image when the screen isn't scrolling. However, this behavior can be bypassed
+        //        by keeping rendering disabled until after this scanline has passed, which results in an image that looks
+        //        more like a traditionally interlaced picture.
+        //        During pixels 280 through 304 of this scanline, the vertical scroll bits are reloaded if rendering is enabled.
+        //      */ 
+        //
+        //     //visible Scanlines
+        //     if (_scanline >= -1 && _scanline < 240)
+        //     { 
+        //         // This is an idle cycle. The value on the PPU address bus during this cycle appears to be the same CHR
+        //         // address that is later used to fetch the low background tile byte starting at dot 5 (possibly calculated
+        //         // during the two unused NT fetches at the end of the previous scanline). 
+        //         if (_scanline == -1 && _cycle == 1)
+        //         {
+        //             _statusRegister.Reset();
+        //         }
+        //
+        //         // The data for each tile is fetched during this phase. Each memory access takes 2 PPU cycles to complete,
+        //         // and 4 must be performed per tile:
+        //         //     Nametable byte
+        //         //     Attribute table byte
+        //         //     Pattern table tile low
+        //         //     Pattern table tile high (+8 bytes from pattern table tile low)
+        //         //
+        //         // The data fetched from these accesses is placed into internal latches, and then fed to the appropriate
+        //         // shift registers when it's time to do so (every 8 cycles). Because the PPU can only fetch an attribute byte every 8 cycles,
+        //         // each sequential string of 8 pixels is forced to have the same palette attribute.
+        //         //
+        //         // Sprite 0 hit acts as if the image starts at cycle 2 (which is the same cycle that the shifters shift for the first time),
+        //         // so the sprite 0 flag will be raised at this point at the earliest. Actual pixel output is delayed further due to internal
+        //         // render pipelining, and the first pixel is output during cycle 4.
+        //         //
+        //         // The shifters are reloaded during ticks 9, 17, 25, ..., 257.
+        //         //
+        //         // Note: At the beginning of each scanline, the data for the first two tiles is already loaded into the
+        //         // shift registers (and ready to be rendered), so the first tile that gets fetched is Tile 3.
+        //         //
+        //         // While all of this is going on, sprite evaluation for the next scanline is taking place as a seperate process,
+        //         // independent to what's happening here. 
+        //         if (_cycle >= 1 && _cycle <= 256)
+        //         {
+        //             
+        //         }
+        //     }
+        //
+        //     // PostRender Scanline
+        //     if (_scanline == 240)
+        //     {
+        //         
+        //     }
+        //
+        //     // Vertical blanking lines (241-260)
+        //     // The VBlank flag of the PPU is set at tick 1 (the second tick) of scanline 241, where the VBlank NMI also
+        //     // occurs. The PPU makes no memory accesses during these scanlines, so PPU memory can be freely accessed by
+        //     // the program. 
+        //     if (_scanline >= 241 && _scanline <= 260)
+        //     {
+        //         //Start VBlank if we have just entered the blanking phase
+        //         if (_scanline == 241 && _cycle == 1)
+        //         {
+        //             _statusRegister.SetFlag(PpuStatusRegisterFlags.V);
+        //
+        //             if (_controlRegister.HasFlag(PpuControlRegisterFlags.NonMaskableInterrupt))
+        //                 _enableNMI = true;
+        //         }
+        //     }
+        //
+        //     //advance to the next 'column'
+        //     _cycle++;
+        //     
+        //     //end of cycles
+        //     if (_cycle >= 341)
+        //     {
+        //         //reset cycles
+        //         _cycle = 0;
+        //         //advance to next 'row'
+        //         _scanline++;
+        //         
+        //         //if the next row is then we reset and start again.
+        //         if (_scanline >= 261)
+        //         {
+        //             _scanline = -1;
+        //             FrameComplete = true;
+        //             _oddFrame = !_oddFrame;
+        //         }
+        //     }
+        // }
+        
+        private void Tax()
         {
-            /* This is a dummy scanline, whose sole purpose is to fill the shift registers with the data for the first
-               two tiles of the next scanline. Although no pixels are rendered for this scanline, the PPU still makes
-               the same memory accesses it would for a regular scanline.
-               
-               This scanline varies in length, depending on whether an even or an odd frame is being rendered. For odd
-               frames, the cycle at the end of the scanline is skipped (this is done internally by jumping directly
-               from (339,261) to (0,0), replacing the idle tick at the beginning of the first visible scanline with the
-               last tick of the last dummy nametable fetch). For even frames, the last cycle occurs normally. This is
-               done to compensate for some shortcomings with the way the PPU physically outputs its video signal, the
-               end result being a crisper image when the screen isn't scrolling. However, this behavior can be bypassed
-               by keeping rendering disabled until after this scanline has passed, which results in an image that looks
-               more like a traditionally interlaced picture.
-               During pixels 280 through 304 of this scanline, the vertical scroll bits are reloaded if rendering is enabled.
-             */ 
-
-            //visible Scanlines
-            if (_scanline >= -1 && _scanline < 240)
-            { 
-                // This is an idle cycle. The value on the PPU address bus during this cycle appears to be the same CHR
-                // address that is later used to fetch the low background tile byte starting at dot 5 (possibly calculated
-                // during the two unused NT fetches at the end of the previous scanline). 
-                if (_scanline == -1 && _cycle == 1)
-                {
-                    _statusRegister.Reset();
-                }
-
-                // The data for each tile is fetched during this phase. Each memory access takes 2 PPU cycles to complete,
-                // and 4 must be performed per tile:
-                //     Nametable byte
-                //     Attribute table byte
-                //     Pattern table tile low
-                //     Pattern table tile high (+8 bytes from pattern table tile low)
-                //
-                // The data fetched from these accesses is placed into internal latches, and then fed to the appropriate
-                // shift registers when it's time to do so (every 8 cycles). Because the PPU can only fetch an attribute byte every 8 cycles,
-                // each sequential string of 8 pixels is forced to have the same palette attribute.
-                //
-                // Sprite 0 hit acts as if the image starts at cycle 2 (which is the same cycle that the shifters shift for the first time),
-                // so the sprite 0 flag will be raised at this point at the earliest. Actual pixel output is delayed further due to internal
-                // render pipelining, and the first pixel is output during cycle 4.
-                //
-                // The shifters are reloaded during ticks 9, 17, 25, ..., 257.
-                //
-                // Note: At the beginning of each scanline, the data for the first two tiles is already loaded into the
-                // shift registers (and ready to be rendered), so the first tile that gets fetched is Tile 3.
-                //
-                // While all of this is going on, sprite evaluation for the next scanline is taking place as a seperate process,
-                // independent to what's happening here. 
-                if (_cycle >= 1 && _cycle <= 256)
-                {
-                    
-                }
-            }
-
-            // PostRender Scanline
-            if (_scanline == 240)
-            {
-                
-            }
-
-            // Vertical blanking lines (241-260)
-            // The VBlank flag of the PPU is set at tick 1 (the second tick) of scanline 241, where the VBlank NMI also
-            // occurs. The PPU makes no memory accesses during these scanlines, so PPU memory can be freely accessed by
-            // the program. 
-            if (_scanline >= 241 && _scanline <= 260)
-            {
-                //Start VBlank if we have just entered the blanking phase
-                if (_scanline == 241 && _cycle == 1)
-                {
-                    _statusRegister.SetFlag(PpuStatusRegisterFlags.V);
-
-                    if (_controlRegister.HasFlag(PpuControlRegisterFlags.NonMaskableInterrupt))
-                        _enableNMI = true;
-                }
-            }
-
-            //advance to the next 'column'
-            _cycle++;
-            
-            //end of cycles
-            if (_cycle >= 341)
-            {
-                //reset cycles
-                _cycle = 0;
-                //advance to next 'row'
-                _scanline++;
-                
-                //if the next row is then we reset and start again.
-                if (_scanline >= 261)
-                {
-                    _scanline = -1;
-                    FrameComplete = true;
-                    _oddFrame = !_oddFrame;
-                }
-            }
+	        if (_maskRegister.HasFlag(PpuMaskRegisterFlags.Backgrounds) || 
+	            _maskRegister.HasFlag(PpuMaskRegisterFlags.Sprites))
+	        {
+		        _scrollRegister.NametableX = _transferScrollRegister.NametableX;
+		        _scrollRegister.CoarseX = _transferScrollRegister.CoarseX;
+	        }
         }
+        
+        private void  IncrementScrollX()
+        {
+	        if (_maskRegister.HasFlag(PpuMaskRegisterFlags.Backgrounds) || 
+	            _maskRegister.HasFlag(PpuMaskRegisterFlags.Sprites))
+	        {
+		        if (_scrollRegister.CoarseX == 31)
+		        {
+			        // Leaving nametable so wrap address round
+			        _scrollRegister.CoarseX = 0;
+			        // Flip target nametable bit
+			        _scrollRegister.NametableX = (byte) ~_scrollRegister.NametableX;
+		        }
+		        else
+		        {
+			        // Staying in current nametable, so just increment
+			        _scrollRegister.CoarseX++;
+		        }
+	        }
+        }
+        
+		private void IncrementScrollY()
+		{
+			if (_maskRegister.HasFlag(PpuMaskRegisterFlags.Backgrounds) || 
+			    _maskRegister.HasFlag(PpuMaskRegisterFlags.Sprites))
+			{
+				// If possible, just increment the fine y offset
+				if (_scrollRegister.FineY < 7)
+				{
+					_scrollRegister.FineY++;
+				}
+				else
+				{
+					_scrollRegister.FineY = 0;
+					
+					if (_scrollRegister.CoarseY == 29)
+					{
+						_scrollRegister.CoarseY = 0;
+						_scrollRegister.NametableY = (byte) ~_scrollRegister.NametableY;
+					}
+					else if (_scrollRegister.CoarseY == 31)
+					{
+						_scrollRegister.CoarseY = 0;
+					}
+					else
+					{
+						_scrollRegister.CoarseY++;
+					}
+				}
+			}
+		}
+		
+		private void Tay()
+		{
+			if (_maskRegister.HasFlag(PpuMaskRegisterFlags.Backgrounds) || 
+			    _maskRegister.HasFlag(PpuMaskRegisterFlags.Sprites))
+			{
+				_scrollRegister.FineY = _transferScrollRegister.FineY;
+				_scrollRegister.NametableY = _transferScrollRegister.NametableY;
+				_scrollRegister.CoarseY = _transferScrollRegister.CoarseY;
+			}
+		}
+		
+		// ==============================================================================
+		// Prime the "in-effect" background tile shifters ready for outputting next
+		// 8 pixels in scanline.
+		private void LoadBackgroundShifters()
+		{
+			BackgroundShifterPatternLo = (BackgroundShifterPatternLo & 0xFF00) | bg_next_tile_lsb;
+			BackgroundShifterPatternHi = (BackgroundShifterPatternHi & 0xFF00) | bg_next_tile_msb;
+			
+			BackgroundShifterAttributeLo  = (BackgroundShifterPatternLo & 0xFF00) | ((bg_next_tile_attrib & 0b01) ? 0xFF : 0x00);
+			BackgroundShifterAttributeHi  = (BackgroundShifterPatternHi & 0xFF00) | ((bg_next_tile_attrib & 0b10) ? 0xFF : 0x00);
+		}
+		
+		private void UpdateShifters()
+		{
+			if (_maskRegister.HasFlag(PpuMaskRegisterFlags.Backgrounds))
+			{
+				// Shifting background tile pattern row
+				BackgroundShifterPatternLo <<= 1;
+				BackgroundShifterPatternHi <<= 1;
+
+				// Shifting palette attributes by 1
+				BackgroundShifterAttributeLo <<= 1;
+				BackgroundShifterAttributeHi <<= 1;
+			}
+
+			if (_maskRegister.HasFlag(PpuMaskRegisterFlags.Sprites) && _cycle >= 1 && _cycle < 258)
+			{
+				for (int i = 0; i < sprite_count; i++)
+				{
+					if (_spriteScanLine[i].X > 0)
+					{
+						_spriteScanLine[i].X--;
+					}
+					else
+					{
+						SpriteShifterPatternLo[i] <<= 1;
+						SpriteShifterPatternHi[i] <<= 1;
+					}
+				}
+			}
+		}
+        
+		public override void Clock()
+		{
+
+			// All but 1 of the secanlines is visible to the user. The pre-render scanline
+			// at -1, is used to configure the "shifters" for the first visible scanline, 0.
+			if (_scanline >= -1 && _scanline < 240)
+			{		
+				// Background Rendering ======================================================
+
+				if (_scanline == 0 && _cycle == 0 && _oddFrame && 
+				    (_maskRegister.HasFlag(PpuMaskRegisterFlags.Backgrounds) || 
+				     _maskRegister.HasFlag(PpuMaskRegisterFlags.Sprites)))
+				{
+					// "Odd Frame" cycle skip
+					_cycle = 1;
+				}
+
+				if (_scanline == -1 && _cycle == 1)
+				{
+					// Effectively start of new frame, so clear vertical blank flag
+					_statusRegister.SetFlag(PpuStatusRegisterFlags.V, false);
+					_statusRegister.SetFlag(PpuStatusRegisterFlags.O, false);
+					_statusRegister.SetFlag(PpuStatusRegisterFlags.S, false);
+					
+					// Clear Shifters
+					for (int i = 0; i < 8; i++)
+					{
+						SpriteShifterPatternLo[i] = 0;
+						SpriteShifterPatternHi[i] = 0;
+					}
+				}
+
+
+				if ((_cycle >= 2 && _cycle < 258) || (_cycle >= 321 && _cycle < 338))
+				{
+					UpdateShifters();
+					
+					switch ((_cycle - 1) % 8)
+					{
+						case 0:
+							LoadBackgroundShifters();
+							
+							bg_next_tile_id = PpuRead((ushort)(0x2000 | (_scrollRegister.Register & 0x0FFF)));
+							
+							break;
+						case 2:
+							bg_next_tile_attrib = PpuRead((ushort)(0x23C0 | (_scrollRegister.NametableY << 11) 
+							                                     | (_scrollRegister.NametableX << 10) 
+							                                     | ((_scrollRegister.CoarseY >> 2) << 3) 
+							                                     | (_scrollRegister.CoarseX >> 2)));
+							
+							if (_scrollRegister.CoarseY & 0x02) bg_next_tile_attrib >>= 4;
+							if (_scrollRegister.CoarseX & 0x02) bg_next_tile_attrib >>= 2;
+							bg_next_tile_attrib &= 0x03;
+							break;
+						case 4:
+							var backgroundPatternTableAddress = 0;
+							backgroundPatternTableAddress = _controlRegister.HasFlag(PpuControlRegisterFlags.BackgroundPatternTableAddress) ? 0x1000 : 0;
+							bg_next_tile_lsb = PpuRead((backgroundPatternTableAddress << 12) 
+							                           + ((ushort)bg_next_tile_id << 4) 
+							                           + (_scrollRegister.FineY) + 0);
+
+						break;
+					case 6:
+						backgroundPatternTableAddress = _controlRegister.HasFlag(PpuControlRegisterFlags.BackgroundPatternTableAddress) ? 0x1000 : 0;
+						bg_next_tile_msb = PpuRead((backgroundPatternTableAddress << 12)
+						                           + ((ushort)bg_next_tile_id << 4)
+						                           + (_scrollRegister.FineY) + 8);
+						break;
+					case 7:
+						IncrementScrollX();
+						break;
+					}
+				}
+
+				// End of a visible scanline, so increment downwards...
+				if (_cycle == 256)
+				{
+					IncrementScrollY();
+				}
+
+				//...and reset the x position
+				if (_cycle == 257)
+				{
+					LoadBackgroundShifters();
+					Tax();
+				}
+
+				// Superfluous reads of tile id at end of scanline
+				if (_cycle == 338 || _cycle == 340)
+				{
+					bg_next_tile_id = PpuRead((ushort)(0x2000 | (_scrollRegister.Register & 0x0FFF)));
+				}
+
+				if (_scanline == -1 && _cycle >= 280 && _cycle < 305)
+				{
+					// End of vertical blank period so reset the Y address ready for rendering
+					Tay();
+				}
+				
+				if (_cycle == 257 && _scanline >= 0)
+				{
+					std::memset(spriteScanline, 0xFF, 8 * sizeof(sObjectAttributeEntry));
+					
+					sprite_count = 0;
+
+					for (byte i = 0; i < 8; i++)
+					{
+						SpriteShifterPatternLo[i] = 0;
+						SpriteShifterPatternHi[i] = 0;
+					}
+					
+					byte nOAMEntry = 0;
+					
+					bSpriteZeroHitPossible = false;
+
+					while (nOAMEntry < 64 && sprite_count < 9)
+					{
+						ushort diff = (ushort)(_scanline - _oam[nOAMEntry].Y);
+
+						var spriteSize = 0;
+
+						spriteSize = _controlRegister.HasFlag(PpuControlRegisterFlags.SpriteSize) ? 16 : 8;
+						
+						if (diff >= 0 && diff < spriteSize && sprite_count < 8)
+						{
+							if (sprite_count < 8)
+							{
+								if (nOAMEntry == 0)
+								{
+									bSpriteZeroHitPossible = true;
+								}
+
+								memcpy(&spriteScanline[sprite_count], &OAM[nOAMEntry], sizeof(sObjectAttributeEntry));						
+							}			
+							sprite_count++;
+						}
+						nOAMEntry++;
+					} // End of sprite evaluation for next scanline
+
+					// Set sprite overflow flag
+					_statusRegister.SetFlag(PpuStatusRegisterFlags.O, sprite_count >= 8);
+				}
+
+				if (_cycle == 340)
+				{
+					for (byte i = 0; i < sprite_count; i++)
+					{
+						byte sprite_pattern_bits_lo, sprite_pattern_bits_hi;
+						ushort SpritePatternTableAddressLo, sprite_pattern_addr_hi;
+						
+						if (!_controlRegister.HasFlag(PpuControlRegisterFlags.SpriteSize))
+						{
+							var patternTable = 0;
+							patternTable = _controlRegister.HasFlag(PpuControlRegisterFlags.SpritePatternTableAddress) ? 0x1000 : 0;
+							
+							if ((_spriteScanLine[i].Attribute & 0x80) == 0)
+							{
+								SpritePatternTableAddressLo = 
+								  (ushort) ((patternTable)  // Which Pattern Table? 0KB or 4KB offset
+								            | (_spriteScanLine[i].Id   << 4   )  // Which Cell? Tile ID * 16 (16 bytes per tile)
+								            | (_scanline - _spriteScanLine[i].Y)); // Which Row in cell? (0->7)
+														
+							}
+							else
+							{
+								SpritePatternTableAddressLo = 
+								  (ushort) ((patternTable)  // Which Pattern Table? 0KB or 4KB offset
+								            | (_spriteScanLine[i].Id   << 4   )  // Which Cell? Tile ID * 16 (16 bytes per tile)
+								            | (7 - (_scanline - _spriteScanLine[i].Y))); // Which Row in cell? (7->0)
+							}
+
+						}
+						else
+						{
+							// 8x16 Sprite Mode - The sprite attribute determines the pattern table
+							if ((_spriteScanLine[i].Attribute & 0x80) == 0)
+							{
+								// Sprite is NOT flipped vertically, i.e. normal
+								if (_scanline - _spriteScanLine[i].Y < 8)
+								{
+									// Reading Top half Tile
+									SpritePatternTableAddressLo = 
+									  (ushort) (((_spriteScanLine[i].Id & 0x01)      << 12)  // Which Pattern Table? 0KB or 4KB offset
+									            | ((_spriteScanLine[i].Id & 0xFE)      << 4 )  // Which Cell? Tile ID * 16 (16 bytes per tile)
+									            | ((_scanline - _spriteScanLine[i].Y) & 0x07 )); // Which Row in cell? (0->7)
+								}
+								else
+								{
+									// Reading Bottom Half Tile
+									SpritePatternTableAddressLo = 
+									  (ushort) (( (_spriteScanLine[i].Id & 0x01)      << 12)  // Which Pattern Table? 0KB or 4KB offset
+									            | (((_spriteScanLine[i].Id & 0xFE) + 1) << 4 )  // Which Cell? Tile ID * 16 (16 bytes per tile)
+									            | ((_scanline - _spriteScanLine[i].Y) & 0x07  )); // Which Row in cell? (0->7)
+								}
+							}
+							else
+							{
+								// Sprite is flipped vertically, i.e. upside down
+								if (_scanline - _spriteScanLine[i].Y < 8)
+								{
+									// Reading Top half Tile
+									SpritePatternTableAddressLo = 
+									  (ushort) (( (_spriteScanLine[i].Id & 0x01)      << 12)    // Which Pattern Table? 0KB or 4KB offset
+									            | (((_spriteScanLine[i].Id & 0xFE) + 1) << 4 )    // Which Cell? Tile ID * 16 (16 bytes per tile)
+									            | (7 - (_scanline - _spriteScanLine[i].Y) & 0x07)); // Which Row in cell? (0->7)
+								}
+								else
+								{
+									// Reading Bottom Half Tile
+									SpritePatternTableAddressLo = 
+									  (ushort) (((_spriteScanLine[i].Id & 0x01)       << 12)    // Which Pattern Table? 0KB or 4KB offset
+									            | ((_spriteScanLine[i].Id & 0xFE)       << 4 )    // Which Cell? Tile ID * 16 (16 bytes per tile)
+									            | (7 - (_scanline - _spriteScanLine[i].Y) & 0x07)); // Which Row in cell? (0->7)
+								}
+							}
+						}
+
+						// Phew... XD I'm absolutely certain you can use some fantastic bit 
+						// manipulation to reduce all of that to a few one liners, but in this
+						// form it's easy to see the processes required for the different
+						// sizes and vertical orientations
+
+						// Hi bit plane equivalent is always offset by 8 bytes from lo bit plane
+						sprite_pattern_addr_hi = (ushort) (SpritePatternTableAddressLo + 8);
+
+						// Now we have the address of the sprite patterns, we can read them
+						sprite_pattern_bits_lo = PpuRead(SpritePatternTableAddressLo);
+						sprite_pattern_bits_hi = PpuRead(sprite_pattern_addr_hi);
+
+						// If the sprite is flipped horizontally, we need to flip the 
+						// pattern bytes. 
+						if ((_spriteScanLine[i].Attribute & 0x40) == 1)
+						{
+							// This little lambda function "flips" a byte
+							// so 0b11100000 becomes 0b00000111. It's very
+							// clever, and stolen completely from here:
+							// https://stackoverflow.com/a/2602885
+							Func<byte, byte> flipByte = (b) =>
+							{
+								b = (byte) ((b & 0xF0) >> 4 | (b & 0x0F) << 4);
+								b = (byte) ((b & 0xCC) >> 2 | (b & 0x33) << 2);
+								b = (byte) ((b & 0xAA) >> 1 | (b & 0x55) << 1);
+								return b;
+							};
+
+							// Flip Patterns Horizontally
+							sprite_pattern_bits_lo = flipByte(sprite_pattern_bits_lo);
+							sprite_pattern_bits_hi = flipByte(sprite_pattern_bits_hi);
+						}
+
+						// Finally! We can load the pattern into our sprite shift registers
+						// ready for rendering on the next scanline
+						SpriteShifterPatternLo[i] = sprite_pattern_bits_lo;
+						SpriteShifterPatternHi[i] = sprite_pattern_bits_hi;
+					}
+				}
+			}
+
+			if (_scanline == 240)
+			{
+				// Post Render Scanline - Do Nothing!
+			}
+
+			if (_scanline >= 241 && _scanline < 261)
+			{
+				if (_scanline == 241 && _cycle == 1)
+				{
+					// Effectively end of frame, so set vertical blank flag
+					_statusRegister.SetFlag(PpuStatusRegisterFlags.V, true);
+
+					// If the control register tells us to emit a NMI when
+					// entering vertical blanking period, do it! The CPU
+					// will be informed that rendering is complete so it can
+					// perform operations with the PPU knowing it wont
+					// produce visible artefacts
+					if (_controlRegister.HasFlag(PpuControlRegisterFlags.NonMaskableInterrupt)) 
+						nmi = true;
+				}
+			}
+			
+			// Composition - We now have background & foreground pixel information for this cycle
+
+			// Background =============================================================
+			byte bg_pixel = 0x00;   // The 2-bit pixel to be rendered
+			byte bg_palette = 0x00; // The 3-bit index of the palette the pixel indexes
+
+			// We only render backgrounds if the PPU is enabled to do so. Note if 
+			// background rendering is disabled, the pixel and palette combine
+			// to form 0x00. This will fall through the colour tables to yield
+			// the current background colour in effect
+			if (_maskRegister.HasFlag(PpuMaskRegisterFlags.Backgrounds))
+			{
+				if (_maskRegister.HasFlag(PpuMaskRegisterFlags.LeftBackground) || (_cycle >= 9))
+				{
+					// Handle Pixel Selection by selecting the relevant bit
+					// depending upon fine x scolling. This has the effect of
+					// offsetting ALL background rendering by a set number
+					// of pixels, permitting smooth scrolling
+					ushort bit_mux = 0x8000 >> fine_x;
+
+					// Select Plane pixels by extracting from the shifter 
+					// at the required location. 
+					byte p0_pixel = (BackgroundShifterPatternLo & bit_mux) > 0;
+					byte p1_pixel = (BackgroundShifterPatternHi & bit_mux) > 0;
+
+					// Combine to form pixel index
+					bg_pixel = (p1_pixel << 1) | p0_pixel;
+
+					// Get palette
+					byte bg_pal0 = (bg_shifter_attrib_lo & bit_mux) > 0;
+					byte bg_pal1 = (bg_shifter_attrib_hi & bit_mux) > 0;
+					bg_palette = (bg_pal1 << 1) | bg_pal0;
+				}
+			}
+
+			// Foreground =============================================================
+			byte foregroundPixel = 0x00;   // The 2-bit pixel to be rendered
+			byte foregroundPalette = 0x00; // The 3-bit index of the palette the pixel indexes
+			bool foregroundPriority = 0x00;// A bit of the sprite attribute indicates if its
+									   // more important than the background
+			if (_maskRegister.HasFlag(PpuMaskRegisterFlags.Sprites))
+			{
+				// Iterate through all sprites for this scanline. This is to maintain
+				// sprite priority. As soon as we find a non transparent pixel of
+				// a sprite we can abort
+				if (_maskRegister.HasFlag(PpuMaskRegisterFlags.LeftSprites) || (_cycle >= 9))
+				{
+					bSpriteZeroBeingRendered = false;
+
+					for (byte i = 0; i < sprite_count; i++)
+					{
+						// Scanline cycle has "collided" with sprite, shifters taking over
+						if (_spriteScanLine[i].X == 0)
+						{
+							// Note Fine X scrolling does not apply to sprites, the game
+							// should maintain their relationship with the background. So
+							// we'll just use the MSB of the shifter
+
+							// Determine the pixel value...
+							
+							byte foregroundPixelLo = (SpriteShifterPatternLo[i] & 0x80) > 0;
+							byte foregroundPixelHi = (SpriteShifterPatternHi[i] & 0x80) > 0;
+							foregroundPixel = (foregroundPixelHi << 1) | foregroundPixelLo;
+
+							// Extract the palette from the bottom two bits. Recall
+							// that foreground palettes are the latter 4 in the 
+							// palette memory.
+							foregroundPalette = (byte) ((_spriteScanLine[i].Attribute & 0x03) + 0x04);
+							foregroundPriority = (_spriteScanLine[i].Attribute & 0x20) == 0;
+
+							// If pixel is not transparent, we render it, and dont
+							// bother checking the rest because the earlier sprites
+							// in the list are higher priority
+							if (foregroundPixel != 0)
+							{
+								if (i == 0) // Is this sprite zero?
+								{
+									bSpriteZeroBeingRendered = true;
+								}
+
+								break;
+							}
+						}
+					}
+				}		
+			}
+			
+			byte pixel = 0x00;   // The FINAL Pixel...
+			byte palette = 0x00; // The FINAL Palette...
+
+			if (bg_pixel == 0 && foregroundPixel == 0)
+			{
+				// The background pixel is transparent
+				// The foreground pixel is transparent
+				// No winner, draw "background" colour
+				pixel = 0x00;
+				palette = 0x00;
+			}
+			else if (bg_pixel == 0 && foregroundPixel > 0)
+			{
+				// The background pixel is transparent
+				// The foreground pixel is visible
+				// Foreground wins!
+				pixel = foregroundPixel;
+				palette = foregroundPalette;
+			}
+			else if (bg_pixel > 0 && foregroundPixel == 0)
+			{
+				// The background pixel is visible
+				// The foreground pixel is transparent
+				// Background wins!
+				pixel = bg_pixel;
+				palette = bg_palette;
+			}
+			else if (bg_pixel > 0 && foregroundPixel > 0)
+			{
+				// The background pixel is visible
+				// The foreground pixel is visible
+				// Hmmm...
+				if (foregroundPriority)
+				{
+					// Foreground cheats its way to victory!
+					pixel = foregroundPixel;
+					palette = foregroundPalette;
+				}
+				else
+				{
+					// Background is considered more important!
+					pixel = bg_pixel;
+					palette = bg_palette;
+				}
+
+				// Sprite Zero Hit detection
+				if (bSpriteZeroHitPossible && bSpriteZeroBeingRendered)
+				{
+					// Sprite zero is a collision between foreground and background
+					// so they must both be enabled
+					if (_maskRegister.HasFlag(PpuMaskRegisterFlags.Backgrounds) &
+					    _maskRegister.HasFlag(PpuMaskRegisterFlags.Sprites))
+					{
+						// The left edge of the screen has specific switches to control
+						// its appearance. This is used to smooth inconsistencies when
+						// scrolling (since sprites x coord must be >= 0)
+						if (!(_maskRegister.HasFlag(PpuMaskRegisterFlags.LeftBackground) | 
+						      _maskRegister.HasFlag(PpuMaskRegisterFlags.LeftSprites)))
+						{
+							if (_cycle >= 9 && _cycle < 258)
+							{
+								_statusRegister.SetFlag(PpuStatusRegisterFlags.S);
+							}
+						}
+						else
+						{
+							if (_cycle >= 1 && _cycle < 258)
+							{
+								_statusRegister.SetFlag(PpuStatusRegisterFlags.S);
+							}
+						}
+					}
+				}
+			}
+
+			// Now we have a final pixel colour, and a palette for this cycle
+			// of the current scanline. Let's at long last, draw that ^&%*er :P
+			int x = _cycle - 1;
+			int y = _scanline;
+			Screen[NesScreenWidth + x * y] = GetColourFromPaletteRam(palette, pixel);
+			
+			_cycle++;
+			
+			if(_maskRegister.HasFlag(PpuMaskRegisterFlags.Backgrounds) || 
+			   _maskRegister.HasFlag(PpuMaskRegisterFlags.Sprites))
+				if (_cycle == 260 && _scanline < 240)
+				{
+					cart->GetMapper()->scanline();
+				}
+
+			if (_cycle >= 341)
+			{
+				_cycle = 0;
+				_scanline++;
+				if (_scanline >= 261)
+				{
+					_scanline = -1;
+					FrameComplete = true;
+					_oddFrame = !_oddFrame;
+				}
+			}
+		}
 
         public void DrawPatternTable(int patternTableSelector, byte palleteId)
         {
@@ -475,7 +1077,6 @@ namespace PolyNES.PPU
             _maskRegister.SetFlag(0);
             _statusRegister.Reset();
             _oamAddress = 0;
-            _scrollRegister.SetFlag(0);
             _ppuAddress = 0;
             _ppuData = 0;
         }
