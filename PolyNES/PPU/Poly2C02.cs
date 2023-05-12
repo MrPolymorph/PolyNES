@@ -58,15 +58,24 @@ namespace PolyNES.PPU
         private int _scanline;
         private int _cycle;
         private bool _oddFrame;
-        private bool _enableNMI;
-        private byte[] SpriteShifterPatternLo;
-        private byte[] SpriteShifterPatternHi;
-        private byte BackgroundShifterPatternLo;
-        private byte BackgroundShifterPatternHi;
-        private byte BackgroundShifterAttributeLo;
-        private byte BackgroundShifterAttributeHi;
+        private bool _enableNonMaskableInterrupt;
+        private bool _nonMaskableInterrupt;
+        private byte[] _spriteShifterPatternLo;
+        private byte[] _spriteShifterPatternHi;
+        private byte _backgroundShifterPatternLo;
+        private byte _backgroundShifterPatternHi;
+        private byte _backgroundShifterAttributeLo;
+        private byte _backgroundShifterAttributeHi;
         private ObjectAttribute[] _spriteScanLine;
         private ObjectAttribute[] _oam;
+        private byte _nextBackgroundTileLo;
+        private byte _nextBackgroundTileHi;
+        private byte _nextBackgroundTileAttribute;
+        private byte _spriteCount;
+        private byte _nextBackgroundTileId;
+        private byte _fineX;
+        private bool _zeroHitPossible;
+        private bool _renderSpriteZero;
         
         
         #region Registers
@@ -104,7 +113,7 @@ namespace PolyNES.PPU
             };
             
             _oddFrame = false;
-            _enableNMI = false;
+            _enableNonMaskableInterrupt = false;
             _scanline = 0;
             _scanline = 0;
             
@@ -496,11 +505,11 @@ namespace PolyNES.PPU
 		// 8 pixels in scanline.
 		private void LoadBackgroundShifters()
 		{
-			BackgroundShifterPatternLo = (BackgroundShifterPatternLo & 0xFF00) | bg_next_tile_lsb;
-			BackgroundShifterPatternHi = (BackgroundShifterPatternHi & 0xFF00) | bg_next_tile_msb;
+			_backgroundShifterPatternLo = (byte) ((_backgroundShifterPatternLo & 0xFF00) | _nextBackgroundTileLo);
+			_backgroundShifterPatternHi = (byte) ((_backgroundShifterPatternHi & 0xFF00) | _nextBackgroundTileHi);
 			
-			BackgroundShifterAttributeLo  = (BackgroundShifterPatternLo & 0xFF00) | ((bg_next_tile_attrib & 0b01) ? 0xFF : 0x00);
-			BackgroundShifterAttributeHi  = (BackgroundShifterPatternHi & 0xFF00) | ((bg_next_tile_attrib & 0b10) ? 0xFF : 0x00);
+			_backgroundShifterAttributeLo  = (byte) ((_backgroundShifterPatternLo & 0xFF00) | ((_nextBackgroundTileAttribute & 0b01) != 0 ? 0xFF : 0x00));
+			_backgroundShifterAttributeHi  = (byte) ((_backgroundShifterPatternHi & 0xFF00) | ((_nextBackgroundTileAttribute & 0b10) != 0 ? 0xFF : 0x00));
 		}
 		
 		private void UpdateShifters()
@@ -508,17 +517,17 @@ namespace PolyNES.PPU
 			if (_maskRegister.HasFlag(PpuMaskRegisterFlags.Backgrounds))
 			{
 				// Shifting background tile pattern row
-				BackgroundShifterPatternLo <<= 1;
-				BackgroundShifterPatternHi <<= 1;
+				_backgroundShifterPatternLo <<= 1;
+				_backgroundShifterPatternHi <<= 1;
 
 				// Shifting palette attributes by 1
-				BackgroundShifterAttributeLo <<= 1;
-				BackgroundShifterAttributeHi <<= 1;
+				_backgroundShifterAttributeLo <<= 1;
+				_backgroundShifterAttributeHi <<= 1;
 			}
 
 			if (_maskRegister.HasFlag(PpuMaskRegisterFlags.Sprites) && _cycle >= 1 && _cycle < 258)
 			{
-				for (int i = 0; i < sprite_count; i++)
+				for (int i = 0; i < _spriteCount; i++)
 				{
 					if (_spriteScanLine[i].X > 0)
 					{
@@ -526,8 +535,8 @@ namespace PolyNES.PPU
 					}
 					else
 					{
-						SpriteShifterPatternLo[i] <<= 1;
-						SpriteShifterPatternHi[i] <<= 1;
+						_spriteShifterPatternLo[i] <<= 1;
+						_spriteShifterPatternHi[i] <<= 1;
 					}
 				}
 			}
@@ -560,8 +569,8 @@ namespace PolyNES.PPU
 					// Clear Shifters
 					for (int i = 0; i < 8; i++)
 					{
-						SpriteShifterPatternLo[i] = 0;
-						SpriteShifterPatternHi[i] = 0;
+						_spriteShifterPatternLo[i] = 0;
+						_spriteShifterPatternHi[i] = 0;
 					}
 				}
 
@@ -575,32 +584,32 @@ namespace PolyNES.PPU
 						case 0:
 							LoadBackgroundShifters();
 							
-							bg_next_tile_id = PpuRead((ushort)(0x2000 | (_scrollRegister.Register & 0x0FFF)));
+							_nextBackgroundTileId = PpuRead((ushort)(0x2000 | (_scrollRegister.Register & 0x0FFF)));
 							
 							break;
 						case 2:
-							bg_next_tile_attrib = PpuRead((ushort)(0x23C0 | (_scrollRegister.NametableY << 11) 
+							_nextBackgroundTileAttribute = PpuRead((ushort)(0x23C0 | (_scrollRegister.NametableY << 11) 
 							                                     | (_scrollRegister.NametableX << 10) 
 							                                     | ((_scrollRegister.CoarseY >> 2) << 3) 
 							                                     | (_scrollRegister.CoarseX >> 2)));
 							
-							if (_scrollRegister.CoarseY & 0x02) bg_next_tile_attrib >>= 4;
-							if (_scrollRegister.CoarseX & 0x02) bg_next_tile_attrib >>= 2;
-							bg_next_tile_attrib &= 0x03;
+							if ((_scrollRegister.CoarseY & 0x02) != 0) _nextBackgroundTileAttribute >>= 4;
+							if ((_scrollRegister.CoarseX & 0x02) != 0) _nextBackgroundTileAttribute >>= 2;
+							_nextBackgroundTileAttribute &= 0x03;
 							break;
 						case 4:
 							var backgroundPatternTableAddress = 0;
 							backgroundPatternTableAddress = _controlRegister.HasFlag(PpuControlRegisterFlags.BackgroundPatternTableAddress) ? 0x1000 : 0;
-							bg_next_tile_lsb = PpuRead((backgroundPatternTableAddress << 12) 
-							                           + ((ushort)bg_next_tile_id << 4) 
-							                           + (_scrollRegister.FineY) + 0);
+							_nextBackgroundTileLo = PpuRead((ushort)((backgroundPatternTableAddress << 12) 
+							                           + (_nextBackgroundTileId << 4) 
+							                           + (_scrollRegister.FineY)));
 
 						break;
 					case 6:
 						backgroundPatternTableAddress = _controlRegister.HasFlag(PpuControlRegisterFlags.BackgroundPatternTableAddress) ? 0x1000 : 0;
-						bg_next_tile_msb = PpuRead((backgroundPatternTableAddress << 12)
-						                           + ((ushort)bg_next_tile_id << 4)
-						                           + (_scrollRegister.FineY) + 8);
+						_nextBackgroundTileHi = PpuRead((ushort)((backgroundPatternTableAddress << 12)
+						                           + (_nextBackgroundTileId << 4)
+						                           + (_scrollRegister.FineY) + 8));
 						break;
 					case 7:
 						IncrementScrollX();
@@ -624,7 +633,7 @@ namespace PolyNES.PPU
 				// Superfluous reads of tile id at end of scanline
 				if (_cycle == 338 || _cycle == 340)
 				{
-					bg_next_tile_id = PpuRead((ushort)(0x2000 | (_scrollRegister.Register & 0x0FFF)));
+					_nextBackgroundTileId = PpuRead((ushort)(0x2000 | (_scrollRegister.Register & 0x0FFF)));
 				}
 
 				if (_scanline == -1 && _cycle >= 280 && _cycle < 305)
@@ -635,51 +644,54 @@ namespace PolyNES.PPU
 				
 				if (_cycle == 257 && _scanline >= 0)
 				{
-					std::memset(spriteScanline, 0xFF, 8 * sizeof(sObjectAttributeEntry));
-					
-					sprite_count = 0;
+					foreach (var ssl in _spriteScanLine)
+					{
+						ssl.Reset();
+					}
+
+					_spriteCount = 0;
 
 					for (byte i = 0; i < 8; i++)
 					{
-						SpriteShifterPatternLo[i] = 0;
-						SpriteShifterPatternHi[i] = 0;
+						_spriteShifterPatternLo[i] = 0;
+						_spriteShifterPatternHi[i] = 0;
 					}
 					
-					byte nOAMEntry = 0;
+					byte oamEntry = 0;
 					
-					bSpriteZeroHitPossible = false;
+					_zeroHitPossible = false;
 
-					while (nOAMEntry < 64 && sprite_count < 9)
+					while (oamEntry < 64 && _spriteCount < 9)
 					{
-						ushort diff = (ushort)(_scanline - _oam[nOAMEntry].Y);
+						ushort diff = (ushort)(_scanline - _oam[oamEntry].Y);
 
 						var spriteSize = 0;
 
 						spriteSize = _controlRegister.HasFlag(PpuControlRegisterFlags.SpriteSize) ? 16 : 8;
 						
-						if (diff >= 0 && diff < spriteSize && sprite_count < 8)
+						if (diff >= 0 && diff < spriteSize && _spriteCount < 8)
 						{
-							if (sprite_count < 8)
+							if (_spriteCount < 8)
 							{
-								if (nOAMEntry == 0)
+								if (oamEntry == 0)
 								{
-									bSpriteZeroHitPossible = true;
+									_zeroHitPossible = true;
 								}
 
-								memcpy(&spriteScanline[sprite_count], &OAM[nOAMEntry], sizeof(sObjectAttributeEntry));						
+								_spriteScanLine[_spriteCount].Set(_oam[oamEntry]);
 							}			
-							sprite_count++;
+							_spriteCount++;
 						}
-						nOAMEntry++;
+						oamEntry++;
 					} // End of sprite evaluation for next scanline
 
 					// Set sprite overflow flag
-					_statusRegister.SetFlag(PpuStatusRegisterFlags.O, sprite_count >= 8);
+					_statusRegister.SetFlag(PpuStatusRegisterFlags.O, _spriteCount >= 8);
 				}
 
 				if (_cycle == 340)
 				{
-					for (byte i = 0; i < sprite_count; i++)
+					for (byte i = 0; i < _spriteCount; i++)
 					{
 						byte sprite_pattern_bits_lo, sprite_pattern_bits_hi;
 						ushort SpritePatternTableAddressLo, sprite_pattern_addr_hi;
@@ -786,8 +798,8 @@ namespace PolyNES.PPU
 
 						// Finally! We can load the pattern into our sprite shift registers
 						// ready for rendering on the next scanline
-						SpriteShifterPatternLo[i] = sprite_pattern_bits_lo;
-						SpriteShifterPatternHi[i] = sprite_pattern_bits_hi;
+						_spriteShifterPatternLo[i] = sprite_pattern_bits_lo;
+						_spriteShifterPatternHi[i] = sprite_pattern_bits_hi;
 					}
 				}
 			}
@@ -810,7 +822,7 @@ namespace PolyNES.PPU
 					// perform operations with the PPU knowing it wont
 					// produce visible artefacts
 					if (_controlRegister.HasFlag(PpuControlRegisterFlags.NonMaskableInterrupt)) 
-						nmi = true;
+						_nonMaskableInterrupt = true;
 				}
 			}
 			
@@ -818,7 +830,7 @@ namespace PolyNES.PPU
 
 			// Background =============================================================
 			byte bg_pixel = 0x00;   // The 2-bit pixel to be rendered
-			byte bg_palette = 0x00; // The 3-bit index of the palette the pixel indexes
+			byte backroundPalette = 0x00; // The 3-bit index of the palette the pixel indexes
 
 			// We only render backgrounds if the PPU is enabled to do so. Note if 
 			// background rendering is disabled, the pixel and palette combine
@@ -832,28 +844,28 @@ namespace PolyNES.PPU
 					// depending upon fine x scolling. This has the effect of
 					// offsetting ALL background rendering by a set number
 					// of pixels, permitting smooth scrolling
-					ushort bit_mux = 0x8000 >> fine_x;
+					ushort bitMultiplex = (ushort) (0x8000 >> _fineX);
 
 					// Select Plane pixels by extracting from the shifter 
 					// at the required location. 
-					byte p0_pixel = (BackgroundShifterPatternLo & bit_mux) > 0;
-					byte p1_pixel = (BackgroundShifterPatternHi & bit_mux) > 0;
+					byte pixel0 = (byte) ((_backgroundShifterPatternLo & bitMultiplex) > 0 ? 1 : 0);
+					byte pixel1 = (byte) ((_backgroundShifterPatternHi & bitMultiplex) > 0 ? 1 : 0);
 
 					// Combine to form pixel index
-					bg_pixel = (p1_pixel << 1) | p0_pixel;
+					bg_pixel = (byte) ((pixel1 << 1) | pixel0);
 
 					// Get palette
-					byte bg_pal0 = (bg_shifter_attrib_lo & bit_mux) > 0;
-					byte bg_pal1 = (bg_shifter_attrib_hi & bit_mux) > 0;
-					bg_palette = (bg_pal1 << 1) | bg_pal0;
+					byte backgroundPalette0 = (byte) ((_backgroundShifterAttributeLo & bitMultiplex) > 0 ? 1 : 0);
+					byte backroundPalette1 = (byte) ((_backgroundShifterAttributeHi & bitMultiplex) > 0 ? 1 : 0);
+					backroundPalette = (byte) ((backroundPalette1 << 1) | backgroundPalette0);
 				}
 			}
 
 			// Foreground =============================================================
 			byte foregroundPixel = 0x00;   // The 2-bit pixel to be rendered
 			byte foregroundPalette = 0x00; // The 3-bit index of the palette the pixel indexes
-			bool foregroundPriority = 0x00;// A bit of the sprite attribute indicates if its
-									   // more important than the background
+			bool foregroundPriority = false; // A bit of the sprite attribute indicates if its
+									          // more important than the background
 			if (_maskRegister.HasFlag(PpuMaskRegisterFlags.Sprites))
 			{
 				// Iterate through all sprites for this scanline. This is to maintain
@@ -861,9 +873,9 @@ namespace PolyNES.PPU
 				// a sprite we can abort
 				if (_maskRegister.HasFlag(PpuMaskRegisterFlags.LeftSprites) || (_cycle >= 9))
 				{
-					bSpriteZeroBeingRendered = false;
+					_renderSpriteZero = false;
 
-					for (byte i = 0; i < sprite_count; i++)
+					for (byte i = 0; i < _spriteCount; i++)
 					{
 						// Scanline cycle has "collided" with sprite, shifters taking over
 						if (_spriteScanLine[i].X == 0)
@@ -874,9 +886,9 @@ namespace PolyNES.PPU
 
 							// Determine the pixel value...
 							
-							byte foregroundPixelLo = (SpriteShifterPatternLo[i] & 0x80) > 0;
-							byte foregroundPixelHi = (SpriteShifterPatternHi[i] & 0x80) > 0;
-							foregroundPixel = (foregroundPixelHi << 1) | foregroundPixelLo;
+							byte foregroundPixelLo = (byte) ((_spriteShifterPatternLo[i] & 0x80) > 0 ? 1 : 0);
+							byte foregroundPixelHi = (byte) ((_spriteShifterPatternHi[i] & 0x80) > 0 ? 1 : 0);
+							foregroundPixel = (byte) ((foregroundPixelHi << 1) | foregroundPixelLo);
 
 							// Extract the palette from the bottom two bits. Recall
 							// that foreground palettes are the latter 4 in the 
@@ -891,7 +903,7 @@ namespace PolyNES.PPU
 							{
 								if (i == 0) // Is this sprite zero?
 								{
-									bSpriteZeroBeingRendered = true;
+									_renderSpriteZero = true;
 								}
 
 								break;
@@ -926,7 +938,7 @@ namespace PolyNES.PPU
 				// The foreground pixel is transparent
 				// Background wins!
 				pixel = bg_pixel;
-				palette = bg_palette;
+				palette = backroundPalette;
 			}
 			else if (bg_pixel > 0 && foregroundPixel > 0)
 			{
@@ -943,11 +955,11 @@ namespace PolyNES.PPU
 				{
 					// Background is considered more important!
 					pixel = bg_pixel;
-					palette = bg_palette;
+					palette = backroundPalette;
 				}
 
 				// Sprite Zero Hit detection
-				if (bSpriteZeroHitPossible && bSpriteZeroBeingRendered)
+				if (_zeroHitPossible && _renderSpriteZero)
 				{
 					// Sprite zero is a collision between foreground and background
 					// so they must both be enabled
@@ -980,7 +992,7 @@ namespace PolyNES.PPU
 			// of the current scanline. Let's at long last, draw that ^&%*er :P
 			int x = _cycle - 1;
 			int y = _scanline;
-			Screen[NesScreenWidth + x * y] = GetColourFromPaletteRam(palette, pixel);
+			Screen[NesScreenWidth + x * y] = GetPaletteColor(palette, pixel);
 			
 			_cycle++;
 			
@@ -988,7 +1000,7 @@ namespace PolyNES.PPU
 			   _maskRegister.HasFlag(PpuMaskRegisterFlags.Sprites))
 				if (_cycle == 260 && _scanline < 240)
 				{
-					cart->GetMapper()->scanline();
+					//cart->GetMapper()->scanline();
 				}
 
 			if (_cycle >= 341)
